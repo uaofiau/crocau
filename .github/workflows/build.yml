@@ -45,6 +45,7 @@ jobs:
   test-win:
     needs: build-win32
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -75,8 +76,20 @@ jobs:
       - name: Self-test (local relay, text + files roundtrip)
         shell: powershell
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\crocau\crocau.ps1" -SelfTest
-          if ($LASTEXITCODE -ne 0) { throw "selftest failed" }
+          $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\crocau\crocau.ps1" -SelfTest 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $msg = $out -replace "`r?`n", "%0A"
+          if ($code -ne 0) { Write-Host "::error title=selftest::$msg"; exit 1 } else { Write-Host "::notice title=selftest::$msg" }
+      - name: GUI test (real window, buttons clicked programmatically)
+        shell: powershell
+        timeout-minutes: 6
+        run: |
+          $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "$PWD\crocau\crocau.ps1" -GuiTest 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $msg = $out -replace "`r?`n", "%0A"
+          if ($code -ne 0) { Write-Host "::error title=guitest::$msg"; exit 1 } else { Write-Host "::notice title=guitest::$msg" }
 
   release:
     needs: test-win

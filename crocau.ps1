@@ -1,6 +1,6 @@
 ﻿# crocau - портабл-оболочка для croc (Windows 7+, PowerShell 2.0+).
 # Две вкладки: отправить / получить (файлы, папки, текст) со своим паролем.
-param([switch]$SelfTest, [string]$CrocPath = "")
+param([switch]$SelfTest, [switch]$GuiTest, [string]$CrocPath = "")
 
 $ErrorActionPreference = "Stop"
 $script:AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -355,7 +355,7 @@ try {
     $txtSP = New-Ctl 'Windows.Forms.TextBox' 10 222 300 24 $null
     $btnGen = New-Ctl 'Windows.Forms.Button' 320 220 110 26 'Случайный'
     $btnSend = New-Ctl 'Windows.Forms.Button' 10 262 150 34 'Отправить'
-    $btnSend.Font = New-Object Drawing.Font('Segoe UI', 10, 'Bold')
+    $btnSend.Font = New-Object Drawing.Font('Segoe UI', 10, [Drawing.FontStyle]::Bold)
     $btnStopS = New-Ctl 'Windows.Forms.Button' 170 262 100 34 'Стоп'
     $btnStopS.Enabled = $false
     $tpSend.Controls.AddRange(@($rbSFiles, $rbSText, $lst, $btnAddF, $btnAddD, $btnDel, $btnClr, $txtSend, $btnPaste, $lblSP, $txtSP, $btnGen, $btnSend, $btnStopS))
@@ -378,7 +378,7 @@ try {
     $btnCopyT = New-Ctl 'Windows.Forms.Button' 580 172 110 26 'Копировать'
     $btnCopyT.Anchor = 'Top,Right'
     $btnRecv = New-Ctl 'Windows.Forms.Button' 10 272 150 34 'Получить'
-    $btnRecv.Font = New-Object Drawing.Font('Segoe UI', 10, 'Bold')
+    $btnRecv.Font = New-Object Drawing.Font('Segoe UI', 10, [Drawing.FontStyle]::Bold)
     $btnStopR = New-Ctl 'Windows.Forms.Button' 170 272 100 34 'Стоп'
     $btnStopR.Enabled = $false
     $tpRecv.Controls.AddRange(@($lblRP, $txtRP, $rbRFiles, $rbRText, $lblOut, $txtOut, $btnBrowse, $lblRT, $txtRT, $btnCopyT, $btnRecv, $btnStopR))
@@ -565,7 +565,84 @@ try {
         if ($script:Runner) { $script:Runner.Kill() }
     })
 
+
+    if ($GuiTest) {
+        # Автотест окна для CI: программно заполняет поля и нажимает кнопки.
+        $script:T = @{ Stage = 0; Start = (Get-Date); Mark = (Get-Date); Fail = 0 }
+        $script:TRelay = Start-Croc (New-Object System.Collections.ArrayList(, @('relay', '--port', '19009', '--ports', '19009,19010,19011,19012,19013'))) $null $null
+        Start-Sleep -Seconds 2
+        $txtRelay.Text = '127.0.0.1:19009'
+        $tset = @{ Relay = '127.0.0.1:19009'; RelayPass = ''; Proxy = ''; Extra = ''; OutDir = '' }
+        $tt = New-Object Windows.Forms.Timer
+        $tt.Interval = 500
+        $tt.Add_Tick({
+            $t = $script:T
+            $el = ((Get-Date) - $t.Mark).TotalSeconds
+            if (((Get-Date) - $t.Start).TotalSeconds -gt 200) {
+                Write-Host ("GUITEST: TIMEOUT at stage " + $t.Stage)
+                if ($script:Runner) { Write-Host (Format-Log $script:Runner.Err) }
+                $script:TRelay.Kill(); [Environment]::Exit(1)
+            }
+            if ($t.Stage -eq 0) {
+                $t.Text = "Привет из GUI`r`nстрока `"2`" & % ^ конец"
+                $t.Pw = 'gui-pass-' + (New-Password)
+                $t.Snd = Start-Send $tset $t.Pw $null $t.Text
+                $t.Mark = Get-Date; $t.Stage = 1
+            }
+            elseif ($t.Stage -eq 1 -and $el -gt 1.5) {
+                $tabs.SelectedTab = $tpRecv
+                $rbRText.Checked = $true
+                $txtRP.Text = $t.Pw
+                $btnRecv.PerformClick()
+                $t.Stage = 2
+            }
+            elseif ($t.Stage -eq 2 -and $script:Runner -eq $null) {
+                if ($txtRT.Text -eq $t.Text) { Write-Host "GUI RECV TEXT: OK" }
+                else { Write-Host "GUI RECV TEXT: FAIL"; Write-Host $log.Text; $t.Fail = $t.Fail + 1 }
+                $t.Snd.Runner.Kill()
+                $src = New-TempWork
+                $t.File = Join-Path $src 'gui файл.bin'
+                $t.Bytes = New-Object byte[] 262144
+                (New-Object Random).NextBytes($t.Bytes)
+                [IO.File]::WriteAllBytes($t.File, $t.Bytes)
+                $t.Pw2 = 'gui-file-' + (New-Password)
+                $t.Dst = New-TempWork
+                $tabs.SelectedTab = $tpSend
+                $rbSFiles.Checked = $true
+                $lst.Items.Clear()
+                Add-Paths @($t.File)
+                $txtSP.Text = $t.Pw2
+                $btnSend.PerformClick()
+                $t.Mark = Get-Date; $t.Stage = 3
+            }
+            elseif ($t.Stage -eq 3 -and $el -gt 1.5) {
+                $t.Rcv = Start-Receive $tset $t.Pw2 $t.Dst
+                $t.Stage = 4
+            }
+            elseif ($t.Stage -eq 4 -and $script:Runner -eq $null -and -not $t.Rcv.Runner.Running) {
+                $got = Join-Path $t.Dst 'gui файл.bin'
+                $same = $false
+                if (Test-Path $got) {
+                    $b2 = [IO.File]::ReadAllBytes($got)
+                    $same = ($b2.Length -eq $t.Bytes.Length)
+                    if ($same) { for ($i = 0; $i -lt $b2.Length; $i++) { if ($b2[$i] -ne $t.Bytes[$i]) { $same = $false; break } } }
+                }
+                if ($same) { Write-Host "GUI SEND FILE: OK" }
+                else { Write-Host "GUI SEND FILE: FAIL"; Write-Host $log.Text; $t.Fail = $t.Fail + 1 }
+                $t.Stage = 5
+                $script:TRelay.Kill()
+                $form.Close()
+            }
+        })
+        $tt.Start()
+    }
+
     [void]$form.ShowDialog()
+
+    if ($GuiTest) {
+        if ($script:T.Fail -eq 0 -and $script:T.Stage -eq 5) { Write-Host "GUITEST PASSED"; exit 0 }
+        else { Write-Host "GUITEST FAILED"; exit 1 }
+    }
 }
 catch {
     $msg = "crocau: ошибка`r`n" + [string]$_ + "`r`n" + $_.ScriptStackTrace
