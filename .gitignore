@@ -1,0 +1,8 @@
+croc.exe
+croc-src/
+dist/
+*.zip
+crocau.ini
+croc-config/
+crocau-error.log
+received/

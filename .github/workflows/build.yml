@@ -1,0 +1,103 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  # Последняя версия croc, которую собирает Go 1.20 (Go 1.20 - последний, работающий на Windows 7).
+  CROC_TAG: v10.0.12
+  GO_VERSION: '1.20'
+
+jobs:
+  build-win32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Build croc.exe (windows/386, Go 1.20)
+        run: |
+          git clone --depth 1 --branch "$CROC_TAG" https://github.com/schollz/croc.git croc-src
+          cd croc-src
+          go version
+          CGO_ENABLED=0 GOOS=windows GOARCH=386 go build -trimpath -ldflags "-s -w" -o ../croc.exe .
+
+      - name: Package
+        run: |
+          mkdir -p dist/crocau
+          cp croc.exe crocau.ps1 crocau.bat crocau-debug.bat dist/crocau/
+          cp README.md dist/crocau/README.txt
+          cp croc-src/LICENSE dist/crocau/LICENSE-croc.txt
+          cd dist && zip -r ../crocau-win32.zip crocau
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crocau-win32
+          path: crocau-win32.zip
+
+  test-win:
+    needs: build-win32
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: crocau-win32
+      - name: Unpack
+        shell: powershell
+        run: |
+          Expand-Archive crocau-win32.zip -DestinationPath .
+          Get-ChildItem crocau
+      - name: croc.exe version (32-bit build)
+        shell: cmd
+        run: crocau\croc.exe --version
+      - name: PE header check (must be 32-bit i386)
+        shell: powershell
+        run: |
+          $b = [IO.File]::ReadAllBytes("crocau\croc.exe")
+          $pe = [BitConverter]::ToInt32($b, 60)
+          $machine = [BitConverter]::ToUInt16($b, $pe + 4)
+          "Machine = 0x{0:X}" -f $machine
+          if ($machine -ne 0x14c) { throw "not i386" }
+      - name: Parse script
+        shell: powershell
+        run: |
+          $errs = $null; $tokens = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD\crocau\crocau.ps1", [ref]$tokens, [ref]$errs)
+          if ($errs.Count -gt 0) { $errs | ForEach-Object { $_.ToString() }; throw "parse errors" }
+          "parse OK"
+      - name: Self-test (local relay, text + files roundtrip)
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\crocau\crocau.ps1" -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw "selftest failed" }
+
+  release:
+    needs: test-win
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: crocau-win32
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          SHORT="${GITHUB_SHA::7}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            gh release create "$TAG" crocau-win32.zip --title "crocau $TAG" --notes "Windows 7+ (32-bit). croc $CROC_TAG, Go $GO_VERSION." || gh release upload "$TAG" crocau-win32.zip --clobber
+          else
+            gh release delete latest --cleanup-tag -y || true
+            gh release create latest crocau-win32.zip --prerelease --target "$GITHUB_SHA" --title "crocau latest ($SHORT)" --notes "Automatic build of commit $SHORT. Windows 7+ (32-bit). croc $CROC_TAG, Go $GO_VERSION."
+          fi
