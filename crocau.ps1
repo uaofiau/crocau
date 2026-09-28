@@ -1,4 +1,4 @@
-\xef\xbb\xbf# crocau - портабл-оболочка для croc (Windows 7+, PowerShell 2.0+).
+﻿# crocau - портабл-оболочка для croc (Windows 7+, PowerShell 2.0+).
 # Две вкладки: отправить / получить (файлы, папки, текст) со своим паролем.
 param([switch]$SelfTest, [string]$CrocPath = "")
 
@@ -268,7 +268,7 @@ if ($SelfTest) {
         [IO.File]::WriteAllBytes($f1, $bytes)
         $dir = Join-Path $src 'папка'
         [void][IO.Directory]::CreateDirectory((Join-Path $dir 'sub'))
-        [IO.File]::WriteAllText((Join-Path $dir 'sub\a.txt'), 'hello', (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText((Join-Path (Join-Path $dir 'sub') 'a.txt'), 'hello', (New-Object Text.UTF8Encoding($false)))
         $dst = New-TempWork
         $pw2 = 'file-pass-' + (New-Password)
         $snd2 = Start-Send $s $pw2 @($f1, $dir) $null
@@ -277,7 +277,7 @@ if ($SelfTest) {
         $ok2 = (Wait-Runner $rcv2.Runner 90)
         [void](Wait-Runner $snd2.Runner 30)
         $g1 = Join-Path $dst 'файл один.bin'
-        $g2 = Join-Path $dst 'папка\sub\a.txt'
+        $g2 = Join-Path (Join-Path (Join-Path $dst 'папка') 'sub') 'a.txt'
         $same = $false
         if ((Test-Path $g1) -and (Test-Path $g2)) {
             $b2 = [IO.File]::ReadAllBytes($g1)
@@ -355,7 +355,7 @@ try {
     $txtSP = New-Ctl 'Windows.Forms.TextBox' 10 222 300 24 $null
     $btnGen = New-Ctl 'Windows.Forms.Button' 320 220 110 26 'Случайный'
     $btnSend = New-Ctl 'Windows.Forms.Button' 10 262 150 34 'Отправить'
-    $btnSend.Font = New-Object Drawing.Font('Segoe UI', 10, [Drawing.FontStyle]::Bold)
+    $btnSend.Font = New-Object Drawing.Font('Segoe UI', 10, 'Bold')
     $btnStopS = New-Ctl 'Windows.Forms.Button' 170 262 100 34 'Стоп'
     $btnStopS.Enabled = $false
     $tpSend.Controls.AddRange(@($rbSFiles, $rbSText, $lst, $btnAddF, $btnAddD, $btnDel, $btnClr, $txtSend, $btnPaste, $lblSP, $txtSP, $btnGen, $btnSend, $btnStopS))
@@ -378,7 +378,7 @@ try {
     $btnCopyT = New-Ctl 'Windows.Forms.Button' 580 172 110 26 'Копировать'
     $btnCopyT.Anchor = 'Top,Right'
     $btnRecv = New-Ctl 'Windows.Forms.Button' 10 272 150 34 'Получить'
-    $btnRecv.Font = New-Object Drawing.Font('Segoe UI', 10, [Drawing.FontStyle]::Bold)
+    $btnRecv.Font = New-Object Drawing.Font('Segoe UI', 10, 'Bold')
     $btnStopR = New-Ctl 'Windows.Forms.Button' 170 272 100 34 'Стоп'
     $btnStopR.Enabled = $false
     $tpRecv.Controls.AddRange(@($lblRP, $txtRP, $rbRFiles, $rbRText, $lblOut, $txtOut, $btnBrowse, $lblRT, $txtRT, $btnCopyT, $btnRecv, $btnStopR))
