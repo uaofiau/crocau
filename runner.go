@@ -75,13 +75,11 @@ func saveSettings(s Settings) {
 // ---------- Пароль -> код-фраза croc ----------
 // croc требует код не короче 6 символов; первые 4 символа - имя комнаты на relay (видно relay),
 // всё после 5-го символа - секрет для PAKE. Короткий пароль пользователя кладём в секретную часть.
-// Для коротких паролей комната фиксированная, чтобы relay не мог вычислить пароль из имени комнаты.
+// Комната выводится из пароля (первые 4 hex-символа хэша): у разных паролей разные комнаты,
+// поэтому передачи разных людей на общем relay не мешают друг другу и не упираются в общий лимит комнаты.
 func makeSecret(pw string) string {
-	room := "crcu"
-	if len(pw) >= 8 {
-		h := sha256.Sum256([]byte("crocau-room:" + pw))
-		room = hex.EncodeToString(h[:])[:4]
-	}
+	h := sha256.Sum256([]byte("crocau-room:" + pw))
+	room := hex.EncodeToString(h[:])[:4]
 	return room + "-" + pw + "~crocau"
 }
 
@@ -254,7 +252,8 @@ func formatLog(raw, secret string) string {
 			continue
 		}
 		t := strings.TrimSpace(l)
-		if strings.HasPrefix(t, "Code is:") || strings.HasPrefix(t, "On the other computer run") {
+		if strings.HasPrefix(t, "Code is:") || strings.HasPrefix(t, "On the other computer run") ||
+			t == "(For Windows)" || t == "(For Linux/OSX)" || strings.HasPrefix(t, "CROC_SECRET") {
 			continue
 		}
 		out = append(out, l)

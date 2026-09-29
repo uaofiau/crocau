@@ -132,6 +132,11 @@ func guiMain(test bool) int {
 				}
 			}
 		}
+		if code != 0 && strings.Contains(job.Log(), "rate limited") {
+			tail += "\r\nПубличный relay временно ограничил подключения с вашего IP (лимит около 30 в минуту на IP; " +
+				"если обе стороны за одним IP - счёт общий). Подождите минуту и повторите. " +
+				"Для постоянной работы укажите свой relay на вкладке «Настройки»."
+		}
 		setLog(job.Log() + tail)
 		job.Cleanup()
 		curJob = nil
