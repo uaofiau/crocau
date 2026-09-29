@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
 
 env:
-  # Последняя версия croc, которую собирает Go 1.20 (Go 1.20 - последний, работающий на Windows 7).
-  CROC_TAG: v10.0.12
+  # Go 1.20 - последний Go, работающий на Windows 7. croc v10.0.12 - последняя версия croc, собираемая Go 1.20.
   GO_VERSION: '1.20'
+  CROC_VERSION: v10.0.12
 
 jobs:
   build-win32:
@@ -22,25 +22,46 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: false
 
-      - name: Build croc.exe (windows/386, Go 1.20)
+      - name: Resolve modules
+        shell: bash
         run: |
-          git clone --depth 1 --branch "$CROC_TAG" https://github.com/schollz/croc.git croc-src
-          cd croc-src
-          go version
-          CGO_ENABLED=0 GOOS=windows GOARCH=386 go build -trimpath -ldflags "-s -w" -o ../croc.exe .
+          set +e
+          {
+            go version
+            go get github.com/lxn/walk@latest github.com/lxn/win@latest github.com/schollz/croc/v10@${CROC_VERSION}
+            go mod tidy
+          } > mod.log 2>&1
+          rc=$?
+          cat mod.log
+          if [ $rc -ne 0 ]; then
+            msg=$(python3 -c "print(open('mod.log').read().replace('%','%25').replace('\r','%0D').replace('\n','%0A'))")
+            echo "::error title=modules::$msg"
+            exit 1
+          fi
 
-      - name: Package
+      - name: Windows manifest resource
         run: |
-          mkdir -p dist/crocau
-          cp croc.exe crocau.ps1 crocau.bat crocau-debug.bat dist/crocau/
-          cp README.md dist/crocau/README.txt
-          cp croc-src/LICENSE dist/crocau/LICENSE-croc.txt
-          cd dist && zip -r ../crocau-win32.zip crocau
+          go install github.com/akavel/rsrc@v0.10.2
+          "$(go env GOPATH)/bin/rsrc" -manifest crocau.manifest -arch 386 -o rsrc_windows_386.syso
+
+      - name: Build crocau.exe (windows/386, Go 1.20)
+        shell: bash
+        run: |
+          set +e
+          CGO_ENABLED=0 GOOS=windows GOARCH=386 go build -trimpath -ldflags "-s -w -H windowsgui" -o crocau.exe . > build.log 2>&1
+          rc=$?
+          cat build.log
+          if [ $rc -ne 0 ]; then
+            msg=$(python3 -c "print(open('build.log').read().replace('%','%25').replace('\r','%0D').replace('\n','%0A'))")
+            echo "::error title=build::$msg"
+            exit 1
+          fi
+          ls -la crocau.exe
 
       - uses: actions/upload-artifact@v4
         with:
           name: crocau-win32
-          path: crocau-win32.zip
+          path: crocau.exe
 
   test-win:
     needs: build-win32
@@ -50,50 +71,42 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: crocau-win32
-      - name: Unpack
+      - name: PE header check (must be 32-bit i386, GUI subsystem)
         shell: powershell
         run: |
-          Expand-Archive crocau-win32.zip -DestinationPath .
-          Get-ChildItem crocau
-      - name: croc.exe version (32-bit build)
-        shell: cmd
-        run: crocau\croc.exe --version
-      - name: PE header check (must be 32-bit i386)
-        shell: powershell
-        run: |
-          $b = [IO.File]::ReadAllBytes("crocau\croc.exe")
+          $b = [IO.File]::ReadAllBytes("$PWD\crocau.exe")
           $pe = [BitConverter]::ToInt32($b, 60)
           $machine = [BitConverter]::ToUInt16($b, $pe + 4)
-          "Machine = 0x{0:X}" -f $machine
+          $subsystem = [BitConverter]::ToUInt16($b, $pe + 24 + 68)
+          "Machine = 0x{0:X}, Subsystem = {1}, Size = {2}" -f $machine, $subsystem, $b.Length
           if ($machine -ne 0x14c) { throw "not i386" }
-      - name: Parse script
+          if ($subsystem -ne 2) { throw "not GUI subsystem" }
+      - name: Self-test (relay + text/files/folder transfers, 3-char password)
         shell: powershell
+        timeout-minutes: 8
         run: |
-          $errs = $null; $tokens = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD\crocau\crocau.ps1", [ref]$tokens, [ref]$errs)
-          if ($errs.Count -gt 0) { $errs | ForEach-Object { $_.ToString() }; throw "parse errors" }
-          "parse OK"
-      - name: Self-test (local relay, text + files roundtrip)
-        shell: powershell
-        run: |
-          $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\crocau\crocau.ps1" -SelfTest 2>&1 | Out-String
-          $code = $LASTEXITCODE
+          $env:CROCAU_TESTLOG = "$PWD\selftest.log"
+          $p = Start-Process -FilePath "$PWD\crocau.exe" -ArgumentList '--selftest' -Wait -PassThru
+          $out = ""
+          if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw }
           Write-Host $out
           $msg = $out -replace "`r?`n", "%0A"
-          if ($code -ne 0) { Write-Host "::error title=selftest::$msg"; exit 1 } else { Write-Host "::notice title=selftest::$msg" }
-      - name: GUI test (real window, buttons clicked programmatically)
+          if ($p.ExitCode -ne 0) { Write-Host "::error title=selftest::exit=$($p.ExitCode) $msg"; exit 1 } else { Write-Host "::notice title=selftest::$msg" }
+      - name: GUI test (real window, handlers called programmatically)
         shell: powershell
         timeout-minutes: 6
         run: |
-          $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "$PWD\crocau\crocau.ps1" -GuiTest 2>&1 | Out-String
-          $code = $LASTEXITCODE
+          $env:CROCAU_TESTLOG = "$PWD\guitest.log"
+          $p = Start-Process -FilePath "$PWD\crocau.exe" -ArgumentList '--guitest' -Wait -PassThru
+          $out = ""
+          if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw }
           Write-Host $out
           $msg = $out -replace "`r?`n", "%0A"
-          if ($code -ne 0) { Write-Host "::error title=guitest::$msg"; exit 1 } else { Write-Host "::notice title=guitest::$msg" }
+          if ($p.ExitCode -ne 0) { Write-Host "::error title=guitest::exit=$($p.ExitCode) $msg"; exit 1 } else { Write-Host "::notice title=guitest::$msg" }
+          if (Test-Path "$PWD\crocau-error.log") { Get-Content "$PWD\crocau-error.log" }
 
   release:
     needs: test-win
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -109,8 +122,8 @@ jobs:
           SHORT="${GITHUB_SHA::7}"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
-            gh release create "$TAG" crocau-win32.zip --title "crocau $TAG" --notes "Windows 7+ (32-bit). croc $CROC_TAG, Go $GO_VERSION." || gh release upload "$TAG" crocau-win32.zip --clobber
+            gh release create "$TAG" crocau.exe --title "crocau $TAG" --notes "Windows 7+ (32-bit), один exe. croc $CROC_VERSION, Go $GO_VERSION." || gh release upload "$TAG" crocau.exe --clobber
           else
             gh release delete latest --cleanup-tag -y || true
-            gh release create latest crocau-win32.zip --prerelease --target "$GITHUB_SHA" --title "crocau latest ($SHORT)" --notes "Automatic build of commit $SHORT. Windows 7+ (32-bit). croc $CROC_TAG, Go $GO_VERSION."
+            gh release create latest crocau.exe --prerelease --target "$GITHUB_SHA" --title "crocau latest ($SHORT)" --notes "Автоматическая сборка коммита $SHORT. Windows 7+ (32-bit), один exe. croc $CROC_VERSION, Go $GO_VERSION."
           fi
