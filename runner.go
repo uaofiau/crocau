@@ -392,7 +392,8 @@ func startSend(s Settings, pw, text string, items []string) (*Job, error) {
 	}
 	secret := makeSecret(pw)
 	mk := func(relay string) []string {
-		args := append(baseArgs(s, relay), "send")
+		// --no-local: без него отправитель при недоступном relay молча ждёт локальную сеть и не сообщает об ошибке
+		args := append(baseArgs(s, relay), "send", "--no-local")
 		return append(args, paths...)
 	}
 	j, err := startCroc(mk, relayList(s, secret), secret, work)

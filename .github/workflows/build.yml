@@ -88,7 +88,7 @@ jobs:
           $env:CROCAU_TESTLOG = "$PWD\selftest.log"
           $p = Start-Process -FilePath "$PWD\crocau.exe" -ArgumentList '--selftest' -Wait -PassThru
           $out = ""
-          if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw }
+          if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw -Encoding UTF8 }
           Write-Host $out
           $msg = $out -replace "`r?`n", "%0A"
           if ($p.ExitCode -ne 0) { Write-Host "::error title=selftest::exit=$($p.ExitCode) $msg"; exit 1 } else { Write-Host "::notice title=selftest::$msg" }
@@ -102,7 +102,7 @@ jobs:
           if ($done) { $code = $p.ExitCode } else { $code = 99 }
           Get-Process crocau -ErrorAction SilentlyContinue | Stop-Process -Force
           $out = ""
-          if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw }
+          if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw -Encoding UTF8 }
           Write-Host $out
           $msg = $out -replace "`r?`n", "%0A"
           if (Test-Path "$PWD\crocau-error.log") { $msg += "%0A" + (Get-Content "$PWD\crocau-error.log" -Raw) }
@@ -119,7 +119,7 @@ jobs:
           if ($done) { $code = $p.ExitCode } else { $code = 99 }
           Get-Process crocau -ErrorAction SilentlyContinue | Stop-Process -Force
           $out = ""
-          if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw }
+          if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw -Encoding UTF8 }
           Write-Host $out
           $msg = $out -replace "`r?`n", "%0A"
           Write-Host "::notice title=nettest exit=$code::$msg"
