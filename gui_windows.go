@@ -383,8 +383,9 @@ func guiMain(test bool) int {
 	})
 
 	if test {
+		testLogf("GUITEST: window created, starting steps")
 		go func() {
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(500 * time.Millisecond)
 			testExit = guiTestSteps(mw, func() bool { return curJob != nil }, func(f func()) {
 				ch := make(chan struct{})
 				mw.Synchronize(func() {
@@ -405,7 +406,7 @@ func guiMain(test bool) int {
 			})
 		}()
 		go func() {
-			time.Sleep(240 * time.Second)
+			time.Sleep(150 * time.Second)
 			testLogf("GUITEST: WATCHDOG TIMEOUT")
 			os.Exit(1)
 		}()
@@ -447,6 +448,7 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 		return 1
 	}
 
+	testLogf("step0: starting relay")
 	relay, err := startTestRelay()
 	if err != nil {
 		testLogf("relay error: %v", err)
@@ -456,6 +458,7 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 	defer relay.Kill()
 	s := Settings{Relay: "127.0.0.1:19009"}
 	ui(func() { h.setRelay("127.0.0.1:19009") })
+	testLogf("step0: relay ready, UI reachable")
 
 	src, _ := newWork()
 	f1 := filepath.Join(src, "gui файл.bin")
@@ -470,6 +473,7 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 		h.setSendPw("abc")
 		h.send()
 	})
+	testLogf("step1: GUI send clicked")
 	time.Sleep(1500 * time.Millisecond)
 	dst1, _ := newWork()
 	rcv, created, err := startReceive(s, "abc", dst1)
@@ -487,6 +491,7 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 			testLogf("%s", rcv.Log())
 		}
 	}
+	testLogf("step1: waiting GUI sender to finish")
 	if !waitIdle(40) {
 		fails++
 		testLogf("GUI sender did not finish")
@@ -500,6 +505,7 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 		fails++
 		return finishTest()
 	}
+	testLogf("step2: external sender started")
 	time.Sleep(1500 * time.Millisecond)
 	dst2, _ := newWork()
 	dst2 = filepath.Join(dst2, "новая папка")
@@ -508,6 +514,7 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 		h.setOut(dst2)
 		h.recv()
 	})
+	testLogf("step2: GUI receive clicked")
 	if !waitIdle(60) {
 		fails++
 		testLogf("GUI receiver did not finish")
