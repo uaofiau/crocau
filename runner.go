@@ -94,10 +94,14 @@ func randomPassword() string {
 	return string(out)
 }
 
-func baseArgs(s Settings) []string {
+// baseArgs собирает общие ключи croc. relay (если не пуст) перекрывает адрес из настроек.
+func baseArgs(s Settings, relay string) []string {
 	var a []string
-	if r := strings.TrimSpace(s.Relay); r != "" {
-		a = append(a, "--relay", r)
+	if relay == "" {
+		relay = strings.TrimSpace(s.Relay)
+	}
+	if relay != "" {
+		a = append(a, "--relay", relay)
 	}
 	if p := strings.TrimSpace(s.RelayPass); p != "" {
 		a = append(a, "--pass", p)
@@ -117,6 +121,33 @@ func baseArgs(s Settings) []string {
 	return a
 }
 
+// Публичные relay croc. Первые четыре - нынешний пул автора (getcroc.com), последний - старый адрес.
+var publicRelays = []string{
+	"1.getcroc.com:9009",
+	"2.getcroc.com:9009",
+	"3.getcroc.com:9009",
+	"4.getcroc.com:9009",
+	"croc.schollz.com:9009",
+}
+
+// relayList возвращает порядок relay для перебора. nil - использовать адрес из настроек как есть.
+// Порядок зависит только от секрета, поэтому отправитель и получатель выбирают одинаково.
+func relayList(s Settings, secret string) []string {
+	if strings.TrimSpace(s.Relay) != "" {
+		return nil
+	}
+	if o := os.Getenv("CROCAU_RELAYS"); o != "" { // для тестов
+		return strings.Split(o, ",")
+	}
+	h := sha256.Sum256([]byte("crocau-relay:" + secret))
+	start := int(h[0]) % 4
+	var order []string
+	for i := 0; i < 4; i++ {
+		order = append(order, publicRelays[(start+i)%4])
+	}
+	return append(order, publicRelays[4])
+}
+
 // ---------- Запуск croc (эта же программа в режиме --croc) ----------
 
 type lockedBuf struct {
@@ -131,10 +162,12 @@ func (l lockedBuf) Write(p []byte) (int, error) {
 }
 
 type Job struct {
-	cmd      *exec.Cmd
-	mu       sync.Mutex
+	mu       sync.Mutex // защищает stdout, stderr, notes, exit, cmd, killed
 	stdout   bytes.Buffer
 	stderr   bytes.Buffer
+	notes    string
+	cmd      *exec.Cmd
+	killed   bool
 	done     chan struct{}
 	exit     int
 	work     string
@@ -144,41 +177,100 @@ type Job struct {
 
 func newWork() (string, error) { return os.MkdirTemp("", "crocau-") }
 
-func startCroc(args []string, secret, work string) (*Job, error) {
+// spawn запускает один процесс croc; буферы вывода очищаются.
+func (j *Job) spawn(args []string) (*exec.Cmd, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	j := &Job{done: make(chan struct{}), work: work, secret: secret}
 	cmd := exec.Command(exe, append([]string{"--croc"}, args...)...)
-	cmd.Dir = work
-	env := append(os.Environ(), "CROC_CONFIG_DIR="+filepath.Join(work, "cfg"))
-	if secret != "" {
-		env = append(env, "CROC_SECRET="+secret)
+	cmd.Dir = j.work
+	env := append(os.Environ(), "CROC_CONFIG_DIR="+filepath.Join(j.work, "cfg"))
+	if j.secret != "" {
+		env = append(env, "CROC_SECRET="+j.secret)
 	}
 	cmd.Env = env
+	j.mu.Lock()
+	j.stdout.Reset()
+	j.stderr.Reset()
+	j.mu.Unlock()
 	cmd.Stdout = lockedBuf{&j.mu, &j.stdout}
 	cmd.Stderr = lockedBuf{&j.mu, &j.stderr}
 	hideWindow(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	j.mu.Lock()
 	j.cmd = cmd
+	j.mu.Unlock()
+	return cmd, nil
+}
+
+func exitCodeOf(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
+}
+
+func isConnectError(text string) bool {
+	return strings.Contains(text, "could not connect")
+}
+
+// startCroc запускает croc. Если relays не пуст, пробует relay по порядку: при ошибке соединения
+// (недоступен, лимит подключений) переходит к следующему.
+func startCroc(mkArgs func(relay string) []string, relays []string, secret, work string) (*Job, error) {
+	j := &Job{done: make(chan struct{}), work: work, secret: secret}
+	idx := 0
+	relayAt := func(i int) string {
+		if len(relays) == 0 {
+			return ""
+		}
+		return relays[i]
+	}
+	cur, err := j.spawn(mkArgs(relayAt(0)))
+	if err != nil {
+		return nil, err
+	}
+	if len(relays) > 0 {
+		j.mu.Lock()
+		j.notes = "Relay: " + relays[0] + "\r\n"
+		j.mu.Unlock()
+	}
 	go func() {
-		err := cmd.Wait()
-		code := 0
-		if err != nil {
-			var ee *exec.ExitError
-			if errors.As(err, &ee) {
-				code = ee.ExitCode()
-			} else {
+		for {
+			werr := cur.Wait()
+			code := exitCodeOf(werr)
+			j.mu.Lock()
+			killed := j.killed
+			errText := j.stderr.String()
+			j.mu.Unlock()
+			if code != 0 && !killed && idx+1 < len(relays) && isConnectError(errText) {
+				reason := "нет соединения"
+				if strings.Contains(errText, "rate limited") {
+					reason = "лимит подключений"
+				}
+				idx++
+				j.mu.Lock()
+				j.notes += "Relay " + relays[idx-1] + ": " + reason + ". Пробую " + relays[idx] + "\r\n"
+				j.mu.Unlock()
+				next, serr := j.spawn(mkArgs(relays[idx]))
+				if serr == nil {
+					cur = next
+					continue
+				}
 				code = -1
 			}
+			j.mu.Lock()
+			j.exit = code
+			j.mu.Unlock()
+			close(j.done)
+			return
 		}
-		j.mu.Lock()
-		j.exit = code
-		j.mu.Unlock()
-		close(j.done)
 	}()
 	return j, nil
 }
@@ -193,8 +285,12 @@ func (j *Job) Running() bool {
 }
 
 func (j *Job) Kill() {
-	if j.cmd != nil && j.cmd.Process != nil {
-		_ = j.cmd.Process.Kill()
+	j.mu.Lock()
+	j.killed = true
+	cmd := j.cmd
+	j.mu.Unlock()
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
 	}
 }
 
@@ -228,8 +324,16 @@ func (j *Job) Stdout() string {
 func (j *Job) Log() string {
 	j.mu.Lock()
 	raw := j.stderr.String()
+	notes := j.notes
 	j.mu.Unlock()
-	return formatLog(raw, j.secret)
+	body := formatLog(raw, j.secret)
+	if notes == "" {
+		return body
+	}
+	if body == "" {
+		return strings.TrimRight(notes, "\r\n")
+	}
+	return notes + body
 }
 
 func (j *Job) Cleanup() {
@@ -286,9 +390,12 @@ func startSend(s Settings, pw, text string, items []string) (*Job, error) {
 		os.RemoveAll(work)
 		return nil, errors.New("нечего отправлять")
 	}
-	args := append(baseArgs(s), "send")
-	args = append(args, paths...)
-	j, err := startCroc(args, makeSecret(pw), work)
+	secret := makeSecret(pw)
+	mk := func(relay string) []string {
+		args := append(baseArgs(s, relay), "send")
+		return append(args, paths...)
+	}
+	j, err := startCroc(mk, relayList(s, secret), secret, work)
 	if err != nil {
 		os.RemoveAll(work)
 		return nil, err
@@ -318,8 +425,11 @@ func startReceive(s Settings, pw, out string) (*Job, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	args := append(baseArgs(s), "--yes", "--overwrite", "--out", out)
-	j, err := startCroc(args, makeSecret(pw), work)
+	secret := makeSecret(pw)
+	mk := func(relay string) []string {
+		return append(baseArgs(s, relay), "--yes", "--overwrite", "--out", out)
+	}
+	j, err := startCroc(mk, relayList(s, secret), secret, work)
 	if err != nil {
 		os.RemoveAll(work)
 		return nil, false, err

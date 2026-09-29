@@ -133,7 +133,7 @@ func guiMain(test bool) int {
 			}
 		}
 		if code != 0 && strings.Contains(job.Log(), "rate limited") {
-			tail += "\r\nПубличный relay временно ограничил подключения с вашего IP (лимит около 30 в минуту на IP; " +
+			tail += "\r\nПубличные relay ограничили подключения с вашего IP (лимит около 30 в минуту на IP; " +
 				"если обе стороны за одним IP - счёт общий). Подождите минуту и повторите. " +
 				"Для постоянной работы укажите свой relay на вкладке «Настройки»."
 		}
@@ -332,7 +332,7 @@ func guiMain(test bool) int {
 						Title:  "Настройки",
 						Layout: VBox{},
 						Children: []Widget{
-							Label{Text: "Адрес relay (host:порт). Пусто = публичный relay croc:"},
+							Label{Text: "Адрес relay (host:порт). Пусто = автоматический выбор из публичных relay croc:"},
 							LineEdit{AssignTo: &relayLE, Text: st.Relay},
 							Label{Text: "Пароль relay (пусто = по умолчанию):"},
 							LineEdit{AssignTo: &relayPassLE, Text: st.RelayPass},

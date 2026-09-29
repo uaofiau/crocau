@@ -24,6 +24,8 @@ func main() {
 			return
 		case "--selftest":
 			os.Exit(selfTest())
+		case "--nettest":
+			os.Exit(netTest())
 		case "--guitest":
 			os.Exit(guiMain(true))
 		}

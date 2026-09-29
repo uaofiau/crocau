@@ -36,7 +36,9 @@ func startTestRelay() (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	j, err := startCroc([]string{"relay", "--port", "19009", "--ports", "19009,19010,19011,19012,19013"}, "", work)
+	j, err := startCroc(func(string) []string {
+		return []string{"relay", "--port", "19009", "--ports", "19009,19010,19011,19012,19013"}
+	}, nil, "", work)
 	if err != nil {
 		return nil, err
 	}
@@ -132,6 +134,19 @@ func selfTest() int {
 		testLogf("WRONG PASSWORD: FAIL text=%q", res.Text)
 	}
 
+	// 4b) перебор relay: первый адрес мёртв, второй - наш тестовый relay
+	os.Setenv("CROCAU_RELAYS", "127.0.0.1:19008,127.0.0.1:19009")
+	dstF, _ := newWork()
+	ok, res, snd, rcv = transfer(Settings{}, "fb1", "fb1", "через запасной relay", nil, dstF, 60*time.Second)
+	os.Unsetenv("CROCAU_RELAYS")
+	if ok && res.Text == "через запасной relay" {
+		testLogf("RELAY FALLBACK: OK")
+	} else {
+		fails++
+		testLogf("RELAY FALLBACK: FAIL text=%q", res.Text)
+		dumpLogs(snd, rcv)
+	}
+
 	// 5) не должно появляться croc-config рядом с exe
 	if fileExists(filepath.Join(exeDir(), "croc-config")) {
 		fails++
@@ -160,4 +175,24 @@ func dumpLogs(snd, rcv *Job) {
 	if rcv != nil {
 		testLogf("--- receiver log ---\r\n%s", rcv.Log())
 	}
+}
+
+// netTest - передача текста через реальные публичные relay (для диагностики из CI).
+func netTest() int {
+	text := "проверка публичных relay"
+	dst, _ := newWork()
+	pw := "net" + randomPassword()
+	ok, res, snd, rcv := transfer(Settings{}, pw, pw, text, nil, dst, 90*time.Second)
+	if snd != nil {
+		testLogf("--- sender ---\r\n%s", snd.Log())
+	}
+	if rcv != nil {
+		testLogf("--- receiver ---\r\n%s", rcv.Log())
+	}
+	if ok && res.Text == text {
+		testLogf("NETTEST: OK")
+		return 0
+	}
+	testLogf("NETTEST: FAIL")
+	return 1
 }
