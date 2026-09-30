@@ -1,11 +1,14 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	crand "crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"time"
 )
 
@@ -36,12 +39,9 @@ func startTestRelay() (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	j, err := startCroc(func(string) []string {
+	j := startJob(JobSpec{Work: work, MkArgs: func(string) []string {
 		return []string{"relay", "--port", "19009", "--ports", "19009,19010,19011,19012,19013"}
-	}, nil, "", work)
-	if err != nil {
-		return nil, err
-	}
+	}})
 	time.Sleep(2 * time.Second)
 	return j, nil
 }
@@ -147,6 +147,196 @@ func selfTest() int {
 		dumpLogs(snd, rcv)
 	}
 
+	// 6) сжатие: единый архив, смешанное содержимое, автоматическая распаковка
+	{
+		asrc, _ := newWork()
+		comp := bytes.Repeat([]byte("строка для сжатия 0123456789\n"), 20000)
+		rnd := randBytes(300000)
+		_ = os.WriteFile(filepath.Join(asrc, "текст.txt"), comp, 0644)
+		_ = os.WriteFile(filepath.Join(asrc, "случайный.bin"), rnd, 0644)
+		_ = os.WriteFile(filepath.Join(asrc, "video.mp4"), comp, 0644)
+		_ = os.MkdirAll(filepath.Join(asrc, "папка2", "вложенная"), 0755)
+		_ = os.WriteFile(filepath.Join(asrc, "папка2", "вложенная", "i.txt"), []byte("inner"), 0644)
+		atext := "текст вместе с архивом\r\nвторая строка"
+		items := []string{filepath.Join(asrc, "текст.txt"), filepath.Join(asrc, "случайный.bin"),
+			filepath.Join(asrc, "video.mp4"), filepath.Join(asrc, "папка2")}
+
+		// 6a) методы сжатия внутри архива
+		zp, err := buildArchive(nil, asrc, atext, items)
+		methodsOK := false
+		if err == nil {
+			if zr, e2 := zip.OpenReader(zp); e2 == nil {
+				m := map[string]*zip.File{}
+				for _, f := range zr.File {
+					m[f.Name] = f
+				}
+				t, r, v := m["текст.txt"], m["случайный.bin"], m["video.mp4"]
+				methodsOK = t != nil && r != nil && v != nil && m[textFileName] != nil &&
+					t.Method == zip.Deflate && t.CompressedSize64 < t.UncompressedSize64/5 &&
+					r.Method == zip.Store && v.Method == zip.Store
+				zr.Close()
+			}
+		}
+		if methodsOK {
+			testLogf("ARCHIVE METHODS (deflate / store by content / store by extension): OK")
+		} else {
+			fails++
+			testLogf("ARCHIVE METHODS: FAIL err=%v", err)
+		}
+
+		// 6b) полная передача со сжатием
+		sc := s
+		sc.Compress = true
+		dstA, _ := newWork()
+		ok, res, snd, rcv := transfer(sc, "zip", "zip", atext, items, dstA, 90*time.Second)
+		leftover := false
+		if es, e := os.ReadDir(dstA); e == nil {
+			for _, e := range es {
+				if strings.HasSuffix(e.Name(), archiveSuffix) {
+					leftover = true
+				}
+			}
+		}
+		if ok && res.Text == atext && !leftover &&
+			fileEquals(filepath.Join(dstA, "текст.txt"), comp) && fileEquals(filepath.Join(dstA, "случайный.bin"), rnd) &&
+			fileEquals(filepath.Join(dstA, "video.mp4"), comp) &&
+			fileEquals(filepath.Join(dstA, "папка2", "вложенная", "i.txt"), []byte("inner")) &&
+			snd != nil && strings.Contains(snd.Log(), "Архив:") {
+			testLogf("COMPRESSED TRANSFER (auto unpack): OK")
+		} else {
+			fails++
+			testLogf("COMPRESSED TRANSFER: FAIL text=%q leftover=%v", res.Text, leftover)
+			dumpLogs(snd, rcv)
+		}
+
+		// 6c) защита от записи за пределы папки (zip-slip)
+		base, _ := newWork()
+		out := filepath.Join(base, "out")
+		_ = os.MkdirAll(out, 0755)
+		bad := []string{"../evil.txt", "..\\evil2.txt", "/abs.txt", "C:/x.txt", "ok/../../evil5.txt"}
+		slipOK := true
+		for _, name := range bad {
+			zf := filepath.Join(base, "bad.zip")
+			f, _ := os.Create(zf)
+			zw := zip.NewWriter(f)
+			w, _ := zw.Create(name)
+			_, _ = w.Write([]byte("x"))
+			_ = zw.Close()
+			_ = f.Close()
+			if err := extractZip(nil, zf, out); err == nil {
+				slipOK = false
+			}
+		}
+		for _, n := range []string{"evil.txt", "evil2.txt", "evil5.txt", "abs.txt", "x.txt"} {
+			if fileExists(filepath.Join(base, n)) || fileExists(filepath.Join(out, n)) {
+				slipOK = false
+			}
+		}
+		if slipOK {
+			testLogf("ZIP-SLIP PROTECTION: OK")
+		} else {
+			fails++
+			testLogf("ZIP-SLIP PROTECTION: FAIL")
+		}
+	}
+
+	// 7) сохранение настроек (включая спецсимволы) и перенос старого формата
+	{
+		tmp, _ := newWork()
+		ini := filepath.Join(tmp, "t.ini")
+		orig := Settings{Relay: "a:1", RelayPass: "x", Extra: "--no-multi", OutDir: `C:\Тест`, Compress: true,
+			ProxyMode: modeProxy, ProxySel: 1, Proxies: []ProxyCfg{
+				{Type: "socks5", Addr: "1.2.3.4:1080"},
+				{Type: "http", Addr: "h.example:8080", Auth: true, User: "u|s er", Pass: "p&a=s%s|"},
+				{Type: "socks4", Addr: "5.6.7.8:1081", Auth: true, User: "id"}}}
+		saveSettingsTo(ini, orig)
+		got := loadSettingsFrom(ini)
+		ini2 := filepath.Join(tmp, "old.ini")
+		_ = os.WriteFile(ini2, []byte("Relay=z\r\nProxy=socks5://bob:pw@9.9.9.9:1080\r\n"), 0644)
+		old := loadSettingsFrom(ini2)
+		if reflect.DeepEqual(orig, got) && old.ProxyMode == modeProxy && len(old.Proxies) == 1 &&
+			old.Proxies[0] == (ProxyCfg{Type: "socks5", Addr: "9.9.9.9:1080", Auth: true, User: "bob", Pass: "pw"}) {
+			testLogf("SETTINGS SAVE/LOAD + LEGACY MIGRATION: OK")
+		} else {
+			fails++
+			testLogf("SETTINGS: FAIL got=%+v old=%+v", got, old)
+		}
+	}
+
+	// 8) прокси: SOCKS5 (логин), SOCKS4, HTTP (логин), авто-режим, неверный пароль, проверка доступности
+	{
+		resolve := map[string]string{"relay.test": "127.0.0.1"}
+		p5 := startTestSocks5("u5", "p5", resolve)
+		p4 := startTestSocks4("id4", resolve)
+		ph := startTestHTTP("uh", "ph", resolve)
+		if p5 == nil || p4 == nil || ph == nil {
+			fails++
+			testLogf("PROXY: test servers failed to start")
+		} else {
+			defer p5.Close()
+			defer p4.Close()
+			defer ph.Close()
+			relayName := "relay.test:19009"
+			c5 := ProxyCfg{Type: "socks5", Addr: p5.Addr, Auth: true, User: "u5", Pass: "p5"}
+			c4 := ProxyCfg{Type: "socks4", Addr: p4.Addr, Auth: true, User: "id4"}
+			ch := ProxyCfg{Type: "http", Addr: ph.Addr, Auth: true, User: "uh", Pass: "ph"}
+			dead := ProxyCfg{Type: "socks5", Addr: "127.0.0.1:1"}
+			bad5 := ProxyCfg{Type: "socks5", Addr: p5.Addr, Auth: true, User: "u5", Pass: "WRONG"}
+
+			run := func(name string, st Settings, pw string, wantOK bool, wait time.Duration) {
+				st.Relay = relayName
+				dst, _ := newWork()
+				ok, res, snd, rcv := transfer(st, pw, pw, "через прокси: "+name, nil, dst, wait)
+				got := ok && res.Text == "через прокси: "+name
+				if snd != nil && !wantOK {
+					snd.Kill()
+				}
+				if got == wantOK {
+					testLogf("PROXY %s: OK", name)
+				} else {
+					fails++
+					testLogf("PROXY %s: FAIL (ok=%v text=%q)", name, ok, res.Text)
+					dumpLogs(snd, rcv)
+				}
+			}
+			run("socks5+auth", Settings{ProxyMode: modeProxy, Proxies: []ProxyCfg{c5}}, "px5", true, 60*time.Second)
+			run("socks4", Settings{ProxyMode: modeProxy, Proxies: []ProxyCfg{c4}}, "px4", true, 60*time.Second)
+			run("http+auth", Settings{ProxyMode: modeProxy, Proxies: []ProxyCfg{ch}}, "pxh", true, 60*time.Second)
+			run("auto (direct fails, dead proxy, http works)", Settings{ProxyMode: modeAuto, Proxies: []ProxyCfg{dead, ch}}, "pxa", true, 90*time.Second)
+			run("direct mode cannot reach relay.test", Settings{ProxyMode: modeDirect, Proxies: []ProxyCfg{c5}}, "pxd", false, 30*time.Second)
+			run("wrong password on proxy", Settings{ProxyMode: modeProxy, Proxies: []ProxyCfg{bad5}}, "pxw", false, 30*time.Second)
+
+			// проверка доступности
+			okProbe := true
+			for _, c := range []ProxyCfg{c5, c4, ch} {
+				cc := c
+				if _, err := probe(Route{P: &cc}, relayName, 4*time.Second); err != nil {
+					okProbe = false
+					testLogf("probe via %s failed: %v", cc.Type, err)
+				}
+			}
+			if _, err := probe(Route{}, "127.0.0.1:19009", 4*time.Second); err != nil {
+				okProbe = false
+				testLogf("direct probe failed: %v", err)
+			}
+			if _, err := probe(Route{}, relayName, 2*time.Second); err == nil {
+				okProbe = false
+				testLogf("direct probe to relay.test unexpectedly succeeded")
+			}
+			b5 := bad5
+			if _, err := probe(Route{P: &b5}, relayName, 4*time.Second); err == nil || !strings.Contains(err.Error(), "логин") {
+				okProbe = false
+				testLogf("wrong-auth probe: %v", err)
+			}
+			if okProbe {
+				testLogf("PROXY CHECK (probe): OK")
+			} else {
+				fails++
+				testLogf("PROXY CHECK (probe): FAIL")
+			}
+		}
+	}
+
 	// 5) не должно появляться croc-config рядом с exe
 	if fileExists(filepath.Join(exeDir(), "croc-config")) {
 		fails++
@@ -179,6 +369,14 @@ func dumpLogs(snd, rcv *Job) {
 
 // netTest - передача текста через реальные публичные relay (для диагностики из CI).
 func netTest() int {
+	probes := checkAll([]Route{{}}, publicRelays, 4*time.Second)
+	for k, r := range publicRelays {
+		if probes[0][k].Err != nil {
+			testLogf("probe %s: FAIL %v", r, probes[0][k].Err)
+		} else {
+			testLogf("probe %s: OK %d ms", r, probes[0][k].RTT.Milliseconds())
+		}
+	}
 	text := "проверка публичных relay"
 	dst, _ := newWork()
 	pw := "net" + randomPassword()

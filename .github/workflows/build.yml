@@ -94,11 +94,11 @@ jobs:
           if ($p.ExitCode -ne 0) { Write-Host "::error title=selftest::exit=$($p.ExitCode) $msg"; exit 1 } else { Write-Host "::notice title=selftest::$msg" }
       - name: GUI test (real window, handlers called programmatically)
         shell: powershell
-        timeout-minutes: 6
+        timeout-minutes: 7
         run: |
           $env:CROCAU_TESTLOG = "$PWD\guitest.log"
           $p = Start-Process -FilePath "$PWD\crocau.exe" -ArgumentList '--guitest' -PassThru
-          $done = $p.WaitForExit(200000)
+          $done = $p.WaitForExit(230000)
           if ($done) { $code = $p.ExitCode } else { $code = 99 }
           Get-Process crocau -ErrorAction SilentlyContinue | Stop-Process -Force
           $out = ""

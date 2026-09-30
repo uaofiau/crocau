@@ -1,9 +1,10 @@
 // crocau - один exe: оболочка (GUI) + встроенный croc.
 // Режимы:
-//   crocau.exe               - окно программы
-//   crocau.exe --croc ...    - внутренний режим: работает как croc (запускается самой программой на каждую передачу)
-//   crocau.exe --selftest    - самотест передачи (для CI)
-//   crocau.exe --guitest     - тест окна (для CI)
+//
+//	crocau.exe               - окно программы
+//	crocau.exe --croc ...    - внутренний режим: работает как croc (запускается самой программой на каждую передачу)
+//	crocau.exe --selftest    - самотест передачи (для CI)
+//	crocau.exe --guitest     - тест окна (для CI)
 package main
 
 import (

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,61 +17,6 @@ import (
 )
 
 const textFileName = "crocau-text.txt"
-
-// ---------- Настройки (crocau.ini рядом с exe) ----------
-
-type Settings struct {
-	Relay, RelayPass, Proxy, Extra, OutDir string
-}
-
-func exeDir() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return "."
-	}
-	return filepath.Dir(exe)
-}
-
-func iniPath() string { return filepath.Join(exeDir(), "crocau.ini") }
-
-func loadSettings() Settings {
-	s := Settings{OutDir: filepath.Join(exeDir(), "received")}
-	data, err := os.ReadFile(iniPath())
-	if err != nil {
-		return s
-	}
-	text := strings.TrimPrefix(string(data), "\ufeff")
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimRight(line, "\r")
-		i := strings.Index(line, "=")
-		if i <= 0 {
-			continue
-		}
-		k, v := strings.TrimSpace(line[:i]), line[i+1:]
-		switch k {
-		case "Relay":
-			s.Relay = v
-		case "RelayPass":
-			s.RelayPass = v
-		case "Proxy":
-			s.Proxy = v
-		case "Extra":
-			s.Extra = v
-		case "OutDir":
-			s.OutDir = v
-		}
-	}
-	return s
-}
-
-func saveSettings(s Settings) {
-	text := "Relay=" + s.Relay + "\r\nRelayPass=" + s.RelayPass + "\r\nProxy=" + s.Proxy +
-		"\r\nExtra=" + s.Extra + "\r\nOutDir=" + s.OutDir + "\r\n"
-	if old, err := os.ReadFile(iniPath()); err == nil && string(old) == text {
-		return
-	}
-	_ = os.WriteFile(iniPath(), []byte(text), 0644)
-}
 
 // ---------- Пароль -> код-фраза croc ----------
 // croc требует код не короче 6 символов; первые 4 символа - имя комнаты на relay (видно relay),
@@ -95,6 +41,7 @@ func randomPassword() string {
 }
 
 // baseArgs собирает общие ключи croc. relay (если не пуст) перекрывает адрес из настроек.
+// baseArgs собирает общие ключи croc. relay (если не пуст) перекрывает адрес из настроек.
 func baseArgs(s Settings, relay string) []string {
 	var a []string
 	if relay == "" {
@@ -105,14 +52,6 @@ func baseArgs(s Settings, relay string) []string {
 	}
 	if p := strings.TrimSpace(s.RelayPass); p != "" {
 		a = append(a, "--pass", p)
-	}
-	if p := strings.TrimSpace(s.Proxy); p != "" {
-		lp := strings.ToLower(p)
-		if strings.HasPrefix(lp, "http://") || strings.HasPrefix(lp, "https://") {
-			a = append(a, "--connect", p)
-		} else {
-			a = append(a, "--socks5", p)
-		}
 	}
 	a = append(a, "--ignore-stdin")
 	if e := strings.TrimSpace(s.Extra); e != "" {
@@ -130,11 +69,11 @@ var publicRelays = []string{
 	"croc.schollz.com:9009",
 }
 
-// relayList возвращает порядок relay для перебора. nil - использовать адрес из настроек как есть.
-// Порядок зависит только от секрета, поэтому отправитель и получатель выбирают одинаково.
+// relayList возвращает relay для перебора по порядку. Порядок зависит только от секрета,
+// поэтому отправитель и получатель выбирают одинаково.
 func relayList(s Settings, secret string) []string {
-	if strings.TrimSpace(s.Relay) != "" {
-		return nil
+	if r := strings.TrimSpace(s.Relay); r != "" {
+		return []string{r}
 	}
 	if o := os.Getenv("CROCAU_RELAYS"); o != "" { // для тестов
 		return strings.Split(o, ",")
@@ -162,10 +101,11 @@ func (l lockedBuf) Write(p []byte) (int, error) {
 }
 
 type Job struct {
-	mu       sync.Mutex // защищает stdout, stderr, notes, exit, cmd, killed
+	mu       sync.Mutex // защищает stdout, stderr, notes, status, exit, cmd, killed
 	stdout   bytes.Buffer
 	stderr   bytes.Buffer
 	notes    string
+	status   string
 	cmd      *exec.Cmd
 	killed   bool
 	done     chan struct{}
@@ -175,21 +115,79 @@ type Job struct {
 	preCount int
 }
 
+// JobSpec описывает задание: подготовка (архив) -> croc по очереди relay x маршрутов -> завершение (распаковка).
+type JobSpec struct {
+	Work       string
+	Secret     string
+	MkArgs     func(relay string) []string
+	Relays     []string // пусто - один запуск с MkArgs("")
+	Routes     []Route  // пусто - напрямую
+	ProbeRelay string   // relay для быстрой проверки маршрутов (если маршрутов больше одного)
+	Prep       func(j *Job) error
+	Post       func(j *Job) error
+}
+
 func newWork() (string, error) { return os.MkdirTemp("", "crocau-") }
 
+func (j *Job) isKilled() bool {
+	if j == nil {
+		return false
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.killed
+}
+
+func (j *Job) addNote(s string) {
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	j.notes += s + "\r\n"
+	j.mu.Unlock()
+}
+
+func (j *Job) setStatus(s string) {
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	j.status = s
+	j.mu.Unlock()
+}
+
+// childEnv: окружение для croc без чужих настроек прокси/croc; прокси задаётся только нами.
+func childEnv(work, secret, proxyURL string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		i := strings.IndexByte(kv, '=')
+		if i > 0 {
+			k := strings.ToUpper(kv[:i])
+			if k == "SOCKS5_PROXY" || k == "HTTP_PROXY" || k == "HTTPS_PROXY" || k == "ALL_PROXY" || strings.HasPrefix(k, "CROC_") {
+				continue
+			}
+		}
+		env = append(env, kv)
+	}
+	env = append(env, "CROC_CONFIG_DIR="+filepath.Join(work, "cfg"))
+	if secret != "" {
+		env = append(env, "CROC_SECRET="+secret)
+	}
+	if proxyURL != "" {
+		env = append(env, "SOCKS5_PROXY="+proxyURL)
+	}
+	return env
+}
+
 // spawn запускает один процесс croc; буферы вывода очищаются.
-func (j *Job) spawn(args []string) (*exec.Cmd, error) {
+func (j *Job) spawn(args []string, proxyURL string) (*exec.Cmd, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
 	cmd := exec.Command(exe, append([]string{"--croc"}, args...)...)
 	cmd.Dir = j.work
-	env := append(os.Environ(), "CROC_CONFIG_DIR="+filepath.Join(j.work, "cfg"))
-	if j.secret != "" {
-		env = append(env, "CROC_SECRET="+j.secret)
-	}
-	cmd.Env = env
+	cmd.Env = childEnv(j.work, j.secret, proxyURL)
 	j.mu.Lock()
 	j.stdout.Reset()
 	j.stderr.Reset()
@@ -221,58 +219,131 @@ func isConnectError(text string) bool {
 	return strings.Contains(text, "could not connect")
 }
 
-// startCroc запускает croc. Если relays не пуст, пробует relay по порядку: при ошибке соединения
-// (недоступен, лимит подключений) переходит к следующему.
-func startCroc(mkArgs func(relay string) []string, relays []string, secret, work string) (*Job, error) {
-	j := &Job{done: make(chan struct{}), work: work, secret: secret}
-	idx := 0
-	relayAt := func(i int) string {
-		if len(relays) == 0 {
-			return ""
-		}
-		return relays[i]
-	}
-	cur, err := j.spawn(mkArgs(relayAt(0)))
-	if err != nil {
-		return nil, err
-	}
-	if len(relays) > 0 {
-		j.mu.Lock()
-		j.notes = "Relay: " + relays[0] + "\r\n"
-		j.mu.Unlock()
-	}
+// startJob запускает задание в фоне и сразу возвращает Job.
+func startJob(spec JobSpec) *Job {
+	j := &Job{done: make(chan struct{}), work: spec.Work, secret: spec.Secret}
 	go func() {
-		for {
-			werr := cur.Wait()
-			code := exitCodeOf(werr)
-			j.mu.Lock()
-			killed := j.killed
-			errText := j.stderr.String()
-			j.mu.Unlock()
-			if code != 0 && !killed && idx+1 < len(relays) && isConnectError(errText) {
-				reason := "нет соединения"
-				if strings.Contains(errText, "rate limited") {
-					reason = "лимит подключений"
-				}
-				idx++
-				j.mu.Lock()
-				j.notes += "Relay " + relays[idx-1] + ": " + reason + ". Пробую " + relays[idx] + "\r\n"
-				j.mu.Unlock()
-				next, serr := j.spawn(mkArgs(relays[idx]))
-				if serr == nil {
-					cur = next
-					continue
-				}
-				code = -1
-			}
-			j.mu.Lock()
-			j.exit = code
-			j.mu.Unlock()
-			close(j.done)
-			return
-		}
+		code := j.run(spec)
+		j.mu.Lock()
+		j.exit = code
+		j.status = ""
+		j.mu.Unlock()
+		close(j.done)
 	}()
-	return j, nil
+	return j
+}
+
+type attemptT struct {
+	relay string
+	route Route
+}
+
+func (a attemptT) describe() string {
+	s := a.relay
+	if s == "" {
+		s = "relay из настроек"
+	}
+	if a.route.P != nil {
+		s += " через " + a.route.Name()
+	}
+	return s
+}
+
+func (j *Job) run(spec JobSpec) int {
+	if spec.Prep != nil {
+		if err := spec.Prep(j); err != nil {
+			if !j.isKilled() {
+				j.addNote("Ошибка подготовки: " + err.Error())
+			}
+			return -1
+		}
+	}
+	relays := spec.Relays
+	if len(relays) == 0 {
+		relays = []string{""}
+	}
+	routes := spec.Routes
+	if len(routes) == 0 {
+		routes = []Route{{}}
+	}
+	if len(routes) > 1 && spec.ProbeRelay != "" && !j.isKilled() {
+		j.setStatus("Проверка соединения...")
+		routes = orderRoutes(routes, spec.ProbeRelay, 3*time.Second)
+		j.setStatus("")
+	}
+	var atts []attemptT
+	for _, rl := range relays {
+		for _, rt := range routes {
+			atts = append(atts, attemptT{rl, rt})
+		}
+	}
+	code := -1
+	for i, a := range atts {
+		if j.isKilled() {
+			return -1
+		}
+		var errText string
+		code, errText = j.attempt(spec, a)
+		if code == 0 {
+			break
+		}
+		if j.isKilled() || i+1 >= len(atts) || !isConnectError(errText) {
+			break
+		}
+		reason := "нет соединения"
+		if strings.Contains(errText, "rate limited") {
+			reason = "лимит подключений"
+		}
+		j.addNote(fmt.Sprintf("%s: %s. Пробую %s", a.describe(), reason, atts[i+1].describe()))
+	}
+	if code == 0 && spec.Post != nil {
+		if err := spec.Post(j); err != nil {
+			j.addNote("Ошибка: " + err.Error())
+			return 2
+		}
+	}
+	return code
+}
+
+// attempt делает одну попытку (relay, маршрут); возвращает код выхода и stderr croc.
+func (j *Job) attempt(spec JobSpec, a attemptT) (int, string) {
+	proxyURL := ""
+	var br *Bridge
+	if a.route.P != nil {
+		var err error
+		br, err = startBridge(a.route)
+		if err != nil {
+			j.addNote("Не удалось запустить локальный мост для прокси: " + err.Error())
+			return -1, "could not connect: " + err.Error()
+		}
+		defer br.Close()
+		proxyURL = br.URL
+	}
+	if a.relay != "" {
+		n := "Relay: " + a.relay
+		if a.route.P != nil {
+			n += " (через " + a.route.Name() + ")"
+		}
+		j.addNote(n)
+	}
+	if j.isKilled() {
+		return -1, ""
+	}
+	cmd, err := j.spawn(spec.MkArgs(a.relay), proxyURL)
+	if err != nil {
+		j.addNote("Не удалось запустить croc: " + err.Error())
+		return -1, ""
+	}
+	code := exitCodeOf(cmd.Wait())
+	j.mu.Lock()
+	errText := j.stderr.String()
+	j.mu.Unlock()
+	if code != 0 && br != nil {
+		if e := br.LastError(); e != "" {
+			j.addNote("Прокси: " + e)
+		}
+	}
+	return code, errText
 }
 
 func (j *Job) Running() bool {
@@ -325,15 +396,14 @@ func (j *Job) Log() string {
 	j.mu.Lock()
 	raw := j.stderr.String()
 	notes := j.notes
+	status := j.status
 	j.mu.Unlock()
 	body := formatLog(raw, j.secret)
-	if notes == "" {
-		return body
+	out := notes
+	if status != "" {
+		out += status + "\r\n"
 	}
-	if body == "" {
-		return strings.TrimRight(notes, "\r\n")
-	}
-	return notes + body
+	return strings.TrimRight(out+body, "\r\n")
 }
 
 func (j *Job) Cleanup() {
@@ -370,38 +440,57 @@ func formatLog(raw, secret string) string {
 
 // ---------- Отправка / получение ----------
 
-// startSend отправляет текст (как служебный файл) и/или файлы и папки одной передачей.
+// startSend отправляет текст и/или файлы и папки одной передачей (по желанию - в zip-архиве).
 func startSend(s Settings, pw, text string, items []string) (*Job, error) {
+	if strings.TrimSpace(text) == "" {
+		text = ""
+	}
+	if text == "" && len(items) == 0 {
+		return nil, errors.New("нечего отправлять")
+	}
+	routes, err := routesFor(s)
+	if err != nil {
+		return nil, err
+	}
 	work, err := newWork()
 	if err != nil {
 		return nil, err
 	}
-	var paths []string
-	if strings.TrimSpace(text) != "" {
-		tp := filepath.Join(work, textFileName)
-		if err := os.WriteFile(tp, []byte(text), 0600); err != nil {
-			os.RemoveAll(work)
-			return nil, err
-		}
-		paths = append(paths, tp)
-	}
-	paths = append(paths, items...)
-	if len(paths) == 0 {
-		os.RemoveAll(work)
-		return nil, errors.New("нечего отправлять")
-	}
 	secret := makeSecret(pw)
-	mk := func(relay string) []string {
-		// --no-local: без него отправитель при недоступном relay молча ждёт локальную сеть и не сообщает об ошибке
-		args := append(baseArgs(s, relay), "send", "--no-local")
-		return append(args, paths...)
+	relays := relayList(s, secret)
+	var paths []string
+	compress := s.Compress && len(items) > 0
+	if !compress {
+		if text != "" {
+			tp := filepath.Join(work, textFileName)
+			if err := os.WriteFile(tp, []byte(text), 0600); err != nil {
+				os.RemoveAll(work)
+				return nil, err
+			}
+			paths = append(paths, tp)
+		}
+		paths = append(paths, items...)
 	}
-	j, err := startCroc(mk, relayList(s, secret), secret, work)
-	if err != nil {
-		os.RemoveAll(work)
-		return nil, err
+	spec := JobSpec{
+		Work: work, Secret: secret, Relays: relays, Routes: routes, ProbeRelay: relays[0],
+		MkArgs: func(relay string) []string {
+			// --no-local: без него отправитель при недоступном relay молча ждёт локальную сеть и не сообщает об ошибке
+			args := append(baseArgs(s, relay), "send", "--no-local")
+			return append(args, paths...)
+		},
 	}
-	return j, nil
+	if compress {
+		spec.Prep = func(j *Job) error {
+			j.setStatus("Архивирование...")
+			p, err := buildArchive(j, work, text, items)
+			if err != nil {
+				return err
+			}
+			paths = []string{p}
+			return nil
+		}
+	}
+	return startJob(spec), nil
 }
 
 func countEntries(dir string) int {
@@ -412,8 +501,13 @@ func countEntries(dir string) int {
 	return len(e)
 }
 
-// startReceive принимает всё в папку out. Второе значение - была ли папка создана нами.
+// startReceive принимает всё в папку out (архивы crocau распаковываются автоматически).
+// Второе значение - была ли папка создана нами.
 func startReceive(s Settings, pw, out string) (*Job, bool, error) {
+	routes, err := routesFor(s)
+	if err != nil {
+		return nil, false, err
+	}
 	created := false
 	if _, err := os.Stat(out); os.IsNotExist(err) {
 		created = true
@@ -421,21 +515,22 @@ func startReceive(s Settings, pw, out string) (*Job, bool, error) {
 	if err := os.MkdirAll(out, 0755); err != nil {
 		return nil, false, err
 	}
-	pre := countEntries(out)
+	pre := listNames(out)
 	work, err := newWork()
 	if err != nil {
 		return nil, false, err
 	}
 	secret := makeSecret(pw)
-	mk := func(relay string) []string {
-		return append(baseArgs(s, relay), "--yes", "--overwrite", "--out", out)
+	relays := relayList(s, secret)
+	spec := JobSpec{
+		Work: work, Secret: secret, Relays: relays, Routes: routes, ProbeRelay: relays[0],
+		MkArgs: func(relay string) []string {
+			return append(baseArgs(s, relay), "--yes", "--overwrite", "--out", out)
+		},
+		Post: func(j *Job) error { return extractArchives(j, out, pre) },
 	}
-	j, err := startCroc(mk, relayList(s, secret), secret, work)
-	if err != nil {
-		os.RemoveAll(work)
-		return nil, false, err
-	}
-	j.preCount = pre
+	j := startJob(spec)
+	j.preCount = len(pre)
 	return j, created, nil
 }
 
@@ -458,7 +553,7 @@ func finalizeReceive(j *Job, out string, created bool) RecvResult {
 		r.Text = s // текст от обычного croc (--text)
 	}
 	n := countEntries(out)
-	if r.Text == "" || (!gotTextFile && n > j.preCount) || (gotTextFile && n > j.preCount) {
+	if r.Text == "" || gotTextFile && n > j.preCount || !gotTextFile && n > j.preCount {
 		r.HasFiles = n > 0
 	}
 	if created && n == 0 {
