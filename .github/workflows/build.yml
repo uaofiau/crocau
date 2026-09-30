@@ -91,7 +91,7 @@ jobs:
           if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw -Encoding UTF8 }
           Write-Host $out
           $msg = $out -replace "`r?`n", "%0A"
-          if ($p.ExitCode -ne 0) { Write-Host "::error title=selftest::exit=$($p.ExitCode) $msg"; exit 1 } else { Write-Host "::notice title=selftest::$msg" }
+          if ($p.ExitCode -ne 0 -or $out -notmatch "SELFTEST PASSED") { Write-Host "::error title=selftest::exit=$($p.ExitCode) $msg"; exit 1 } else { Write-Host "::notice title=selftest::$msg" }
       - name: GUI test (real window, handlers called programmatically)
         shell: powershell
         timeout-minutes: 7
@@ -106,7 +106,7 @@ jobs:
           Write-Host $out
           $msg = $out -replace "`r?`n", "%0A"
           if (Test-Path "$PWD\crocau-error.log") { $msg += "%0A" + (Get-Content "$PWD\crocau-error.log" -Raw) }
-          if ($code -ne 0) { Write-Host "::error title=guitest::exit=$code $msg"; exit 1 } else { Write-Host "::notice title=guitest::$msg" }
+          if ($code -ne 0 -or $out -notmatch "GUITEST PASSED") { Write-Host "::error title=guitest::exit=$code $msg"; exit 1 } else { Write-Host "::notice title=guitest::$msg" }
 
       - name: Public relay check (informational)
         shell: powershell

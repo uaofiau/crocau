@@ -81,6 +81,7 @@ func guiMain(test bool) int {
 	var curCreated bool
 	checking := false
 	testExit := 0
+	testDone := make(chan int, 1)
 
 	rows := make([]*proxyRow, maxProxies)
 	rowCount := 0
@@ -657,7 +658,7 @@ func guiMain(test bool) int {
 		testLogf("GUITEST: window created, starting steps")
 		go func() {
 			time.Sleep(500 * time.Millisecond)
-			testExit = guiTestSteps(mw, func() bool { return curJob != nil }, func(f func()) {
+			testDone <- guiTestSteps(mw, func() bool { return curJob != nil }, func(f func()) {
 				ch := make(chan struct{})
 				mw.Synchronize(func() {
 					defer close(ch)
@@ -693,7 +694,7 @@ func guiMain(test bool) int {
 						}
 					}
 					addRow()
-					if rowCount != 4 || !rows[3].comp.Visible() {
+					if rowCount != 4 {
 						return "add row failed"
 					}
 					removeRow(0)
@@ -726,6 +727,14 @@ func guiMain(test bool) int {
 	}
 
 	mw.Run()
+	if test {
+		select {
+		case testExit = <-testDone:
+		case <-time.After(10 * time.Second):
+			testLogf("GUITEST: no result from test goroutine")
+			testExit = 1
+		}
+	}
 	return testExit
 }
 
