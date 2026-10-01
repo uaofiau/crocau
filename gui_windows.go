@@ -507,7 +507,7 @@ func guiMain(test bool) int {
 									},
 								},
 							},
-							CheckBox{AssignTo: &compressCB, Text: "Сжать перед отправкой (быстрее для больших файлов и множества мелких; уже сжатые форматы не пережимаются)", Checked: st.Compress},
+							CheckBox{AssignTo: &compressCB, Text: "Сжать перед отправкой (текст и файлы; быстрее для больших файлов и множества мелких; уже сжатые форматы не пережимаются)", Checked: st.Compress},
 							Composite{
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
@@ -640,6 +640,11 @@ func guiMain(test bool) int {
 		return 1
 	}
 
+	// У системного поля ввода по умолчанию лимит около 30 000 байт (то есть ~15 000 символов Unicode).
+	for _, te := range []*walk.TextEdit{sendText, recvText, logTE} {
+		te.SetMaxLength(0x7FFFFFFE)
+	}
+
 	applyProxies(st.Proxies, st.ProxySel)
 	setMode(st.ProxyMode)
 
@@ -738,6 +743,16 @@ func guiMain(test bool) int {
 	return testExit
 }
 
+// longTestText строит текст из 40 000+ символов с переводами строк (больше старого лимита поля ввода).
+func longTestText(head string) string {
+	var sb strings.Builder
+	sb.WriteString(head + "\r\n")
+	for i := 0; utf8.RuneCountInString(sb.String()) < 40000; i++ {
+		fmt.Fprintf(&sb, "строка %d - проверка длинного текста\r\n", i)
+	}
+	return sb.String()
+}
+
 type guiHooks struct {
 	setRelay, setSendText, setSendPw, setRecvPw, setOut func(string)
 	addFiles                                            func([]string)
@@ -803,8 +818,8 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 	data := randBytes(262144)
 	_ = os.WriteFile(f1, data, 0644)
 
-	// 1) окно отправляет текст + файл (со сжатием), принимает "внешний" процесс
-	text1 := "Привет из GUI\r\nстрока 2"
+	// 1) окно отправляет длинный текст (40 000+ символов) + файл (со сжатием), принимает "внешний" процесс
+	text1 := longTestText("Привет из GUI")
 	ui(func() {
 		h.setSendText(text1)
 		h.addFiles([]string{f1})
@@ -838,7 +853,7 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 	ui(func() { h.setCompress(false) })
 
 	// 2) "внешний" процесс отправляет текст + файл, принимает окно
-	text2 := "второй текст\r\nс переносом"
+	text2 := longTestText("второй текст")
 	snd, err := startSend(s, "xyz", text2, []string{f1})
 	if err != nil {
 		testLogf("startSend error: %v", err)

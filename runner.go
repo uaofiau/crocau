@@ -459,7 +459,7 @@ func startSend(s Settings, pw, text string, items []string) (*Job, error) {
 	secret := makeSecret(pw)
 	relays := relayList(s, secret)
 	var paths []string
-	compress := s.Compress && len(items) > 0
+	compress := s.Compress
 	if !compress {
 		if text != "" {
 			tp := filepath.Join(work, textFileName)

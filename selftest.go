@@ -209,6 +209,20 @@ func selfTest() int {
 			dumpLogs(snd, rcv)
 		}
 
+		// 6b2) только текст (300 КБ), со сжатием: тоже уходит архивом и приходит целым
+		{
+			big := strings.Repeat("длинный текст для проверки сжатия и размера 0123456789\r\n", 6000)
+			dstT, _ := newWork()
+			ok, res, snd, rcv := transfer(sc, "tz1", "tz1", big, nil, dstT, 90*time.Second)
+			if ok && res.Text == big && !res.HasFiles && snd != nil && strings.Contains(snd.Log(), "Архив:") {
+				testLogf("COMPRESSED TEXT ONLY (%d chars): OK", len([]rune(big)))
+			} else {
+				fails++
+				testLogf("COMPRESSED TEXT ONLY: FAIL (len=%d, files=%v)", len(res.Text), res.HasFiles)
+				dumpLogs(snd, rcv)
+			}
+		}
+
 		// 6c) защита от записи за пределы папки (zip-slip)
 		base, _ := newWork()
 		out := filepath.Join(base, "out")
