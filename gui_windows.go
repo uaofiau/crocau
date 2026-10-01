@@ -58,6 +58,8 @@ func guiMain(test bool) int {
 		fileList    *walk.ListBox
 		sendPw      *walk.LineEdit
 		compressCB  *walk.CheckBox
+		saveSendCB  *walk.CheckBox
+		saveRecvCB  *walk.CheckBox
 		recvPw      *walk.LineEdit
 		outLE       *walk.LineEdit
 		recvText    *walk.TextEdit
@@ -96,6 +98,21 @@ func guiMain(test bool) int {
 			return
 		}
 		walk.MsgBox(mw, "crocau", msg, walk.MsgBoxIconWarning)
+	}
+
+	sealWarned := false
+	saveNow := func(cur Settings) {
+		if err := saveSettings(cur); err != nil && !sealWarned {
+			sealWarned = true
+			warn("Не удалось сохранить пароли в защищённом виде: " + err.Error() +
+				"\n\nОстальные настройки сохранены, пароли - нет.")
+		}
+	}
+	savedPw := func(cb *walk.CheckBox, le *walk.LineEdit) string {
+		if cb.Checked() {
+			return strings.TrimSpace(le.Text())
+		}
+		return ""
 	}
 
 	// ---------- прокси: строки ----------
@@ -203,7 +220,9 @@ func guiMain(test bool) int {
 	collect := func() Settings {
 		return Settings{
 			Relay: relayLE.Text(), RelayPass: relayPassLE.Text(), Extra: extraLE.Text(), OutDir: outLE.Text(),
-			Compress: compressCB.Checked(), ProxyMode: curProxyMode(), ProxySel: selIndex(), Proxies: collectProxies(),
+			Compress:   compressCB.Checked(),
+			SaveSendPw: saveSendCB.Checked(), SendPw: savedPw(saveSendCB, sendPw),
+			SaveRecvPw: saveRecvCB.Checked(), RecvPw: savedPw(saveRecvCB, recvPw), ProxyMode: curProxyMode(), ProxySel: selIndex(), Proxies: collectProxies(),
 		}
 	}
 
@@ -319,7 +338,7 @@ func guiMain(test bool) int {
 			}
 		}
 		cur := collect()
-		saveSettings(cur)
+		saveNow(cur)
 		j, err := startSend(cur, pw, text, items)
 		if err != nil {
 			warn(err.Error())
@@ -344,7 +363,7 @@ func guiMain(test bool) int {
 		}
 		cur := collect()
 		cur.OutDir = out
-		saveSettings(cur)
+		saveNow(cur)
 		_ = recvText.SetText("")
 		j, created, err := startReceive(cur, pw, out)
 		if err != nil {
@@ -395,7 +414,7 @@ func guiMain(test bool) int {
 			return
 		}
 		cur := collect()
-		saveSettings(cur)
+		saveNow(cur)
 		routes, rowIdx := checkRoutes(cur)
 		relays := publicRelays
 		if r := strings.TrimSpace(cur.Relay); r != "" {
@@ -512,7 +531,8 @@ func guiMain(test bool) int {
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
 									Label{Text: "Пароль (от 3 символов):"},
-									LineEdit{AssignTo: &sendPw, MaxSize: Size{Width: 160}},
+									LineEdit{AssignTo: &sendPw, Text: st.SendPw, MaxSize: Size{Width: 160}},
+									CheckBox{AssignTo: &saveSendCB, Text: "запомнить", Checked: st.SaveSendPw},
 									PushButton{Text: "Случайный", OnClicked: func() { _ = sendPw.SetText(randomPassword()) }},
 									HSpacer{},
 									PushButton{AssignTo: &sendBtn, Text: "Отправить", MinSize: Size{Width: 130}, OnClicked: doSend},
@@ -525,7 +545,14 @@ func guiMain(test bool) int {
 						Layout: VBox{},
 						Children: []Widget{
 							Label{Text: "Пароль (тот, что задал отправитель):"},
-							LineEdit{AssignTo: &recvPw, MaxSize: Size{Width: 200}},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									LineEdit{AssignTo: &recvPw, Text: st.RecvPw, MaxSize: Size{Width: 200}},
+									CheckBox{AssignTo: &saveRecvCB, Text: "запомнить", Checked: st.SaveRecvPw},
+									HSpacer{},
+								},
+							},
 							Label{Text: "Папка для сохранения файлов (архивы распаковываются автоматически):"},
 							Composite{
 								Layout: HBox{MarginsZero: true},
@@ -604,7 +631,7 @@ func guiMain(test bool) int {
 							LineEdit{AssignTo: &relayPassLE, Text: st.RelayPass},
 							Label{Text: "Доп. общие ключи croc через пробел (например: --internal-dns --no-multi):"},
 							LineEdit{AssignTo: &extraLE, Text: st.Extra},
-							Label{Text: "Настройки (включая прокси и их пароли) хранятся в crocau.ini рядом с программой. Пароль передачи нигде не сохраняется."},
+							Label{Text: "Настройки хранятся в crocau.ini рядом с программой. Пароли (прокси, relay и отмеченные «запомнить» пароли передачи) сохраняются только в зашифрованном виде, привязанном к вашей учётной записи Windows на этом компьютере; на другом компьютере их придётся ввести заново."},
 							VSpacer{},
 						},
 					},
@@ -647,11 +674,14 @@ func guiMain(test bool) int {
 
 	applyProxies(st.Proxies, st.ProxySel)
 	setMode(st.ProxyMode)
+	if st.SecretNote != "" {
+		setLog(st.SecretNote)
+	}
 
 	win.DragAcceptFiles(mw.Handle(), true)
 	mw.DropFiles().Attach(func(files []string) { addPaths(files) })
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
-		saveSettings(collect())
+		_ = saveSettings(collect())
 		if curJob != nil {
 			curJob.Kill()
 			time.Sleep(300 * time.Millisecond)
@@ -712,12 +742,38 @@ func guiMain(test bool) int {
 						return "select row failed"
 					}
 					tmp := filepath.Join(os.TempDir(), "crocau-gui-rt.ini")
-					saveSettingsTo(tmp, collect())
+					if err := saveSettingsTo(tmp, collect()); err != nil {
+						return "save failed: " + err.Error()
+					}
 					back := loadSettingsFrom(tmp)
 					_ = os.Remove(tmp)
 					if len(back.Proxies) != 3 || back.ProxySel != 2 || back.ProxyMode != modeProxy || back.Proxies[0] != want[1] {
 						return fmt.Sprintf("persist failed: %+v", back)
 					}
+					// сохранение паролей передачи по галочке
+					_ = sendPw.SetText("  tpw1 ")
+					saveSendCB.SetChecked(true)
+					_ = recvPw.SetText("rpw2")
+					saveRecvCB.SetChecked(false)
+					c := collect()
+					if c.SendPw != "tpw1" || !c.SaveSendPw || c.RecvPw != "" || c.SaveRecvPw {
+						return fmt.Sprintf("saved password flags wrong: %+v", c)
+					}
+					if err := saveSettingsTo(tmp, c); err != nil {
+						return "save pw failed: " + err.Error()
+					}
+					raw, _ := os.ReadFile(tmp)
+					back = loadSettingsFrom(tmp)
+					_ = os.Remove(tmp)
+					if strings.Contains(string(raw), "tpw1") || strings.Contains(string(raw), "rpw2") {
+						return "password leaked into ini in plain text"
+					}
+					if back.SendPw != "tpw1" || !back.SaveSendPw || back.RecvPw != "" || back.SecretNote != "" {
+						return fmt.Sprintf("saved password not restored: %+v", back)
+					}
+					_ = sendPw.SetText("")
+					saveSendCB.SetChecked(false)
+					_ = recvPw.SetText("")
 					applyProxies(nil, 0)
 					setMode(modeAuto)
 					return ""

@@ -30,9 +30,16 @@ type Settings struct {
 	Extra     string
 	OutDir    string
 	Compress  bool
-	ProxyMode string
-	ProxySel  int
-	Proxies   []ProxyCfg
+	// Сохранённые пароли передачи (хранятся защищёнными, только если стоит галочка).
+	SaveSendPw bool
+	SendPw     string
+	SaveRecvPw bool
+	RecvPw     string
+	// SecretNote - предупреждение при загрузке (не сохраняется в файл).
+	SecretNote string
+	ProxyMode  string
+	ProxySel   int
+	Proxies    []ProxyCfg
 }
 
 func exeDir() string {
@@ -56,31 +63,36 @@ func normType(t string) string {
 	}
 }
 
-func encodeProxy(p ProxyCfg) string {
+func encodeProxy(p ProxyCfg, seal func(string) string) string {
 	a := "0"
 	if p.Auth {
 		a = "1"
 	}
-	parts := []string{normType(p.Type), p.Addr, a, p.User, p.Pass}
+	parts := []string{normType(p.Type), p.Addr, a, p.User, seal(p.Pass)}
 	for i := range parts {
 		parts[i] = url.QueryEscape(parts[i])
 	}
 	return strings.Join(parts, "|")
 }
 
-func decodeProxy(v string) (ProxyCfg, bool) {
+// decodeProxy: lost=true, если пароль не удалось расшифровать (он тогда пустой).
+func decodeProxy(v string) (p ProxyCfg, ok bool, lost bool) {
 	parts := strings.Split(v, "|")
 	if len(parts) != 5 {
-		return ProxyCfg{}, false
+		return ProxyCfg{}, false, false
 	}
 	for i := range parts {
 		u, err := url.QueryUnescape(parts[i])
 		if err != nil {
-			return ProxyCfg{}, false
+			return ProxyCfg{}, false, false
 		}
 		parts[i] = u
 	}
-	return ProxyCfg{Type: normType(parts[0]), Addr: parts[1], Auth: parts[2] == "1", User: parts[3], Pass: parts[4]}, true
+	pass, err := openSecret(parts[4])
+	if err != nil {
+		pass, lost = "", true
+	}
+	return ProxyCfg{Type: normType(parts[0]), Addr: parts[1], Auth: parts[2] == "1", User: parts[3], Pass: pass}, true, lost
 }
 
 // legacyProxy разбирает старый формат одной строки: socks5://user:pass@host:port или host:port.
@@ -116,6 +128,15 @@ func loadSettingsFrom(path string) Settings {
 		return s
 	}
 	legacy := ""
+	lostAny := false
+	open := func(v string) string {
+		plain, err := openSecret(v)
+		if err != nil {
+			lostAny = true
+			return ""
+		}
+		return plain
+	}
 	text := strings.TrimPrefix(string(data), "\ufeff")
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimRight(line, "\r")
@@ -128,7 +149,15 @@ func loadSettingsFrom(path string) Settings {
 		case "Relay":
 			s.Relay = v
 		case "RelayPass":
-			s.RelayPass = v
+			s.RelayPass = open(v)
+		case "SaveSendPw":
+			s.SaveSendPw = v == "1"
+		case "SendPw":
+			s.SendPw = open(v)
+		case "SaveRecvPw":
+			s.SaveRecvPw = v == "1"
+		case "RecvPw":
+			s.RecvPw = open(v)
 		case "Extra":
 			s.Extra = v
 		case "OutDir":
@@ -150,8 +179,11 @@ func loadSettingsFrom(path string) Settings {
 			}
 			s.ProxySel = n
 		case "ProxyEntry":
-			if p, ok := decodeProxy(v); ok && len(s.Proxies) < maxProxies {
+			if p, ok, lost := decodeProxy(v); ok && len(s.Proxies) < maxProxies {
 				s.Proxies = append(s.Proxies, p)
+				if lost {
+					lostAny = true
+				}
 			}
 		case "Proxy": // формат старых версий
 			legacy = v
@@ -167,28 +199,65 @@ func loadSettingsFrom(path string) Settings {
 	if s.ProxySel < 0 || s.ProxySel >= len(s.Proxies) {
 		s.ProxySel = 0
 	}
+	if !s.SaveSendPw {
+		s.SendPw = ""
+	}
+	if !s.SaveRecvPw {
+		s.RecvPw = ""
+	}
+	if lostAny {
+		s.SecretNote = "Не удалось расшифровать сохранённые пароли: файл настроек создан на другом компьютере " +
+			"или под другим пользователем Windows. Введите пароли заново."
+	}
 	return s
 }
 
-func saveSettingsTo(path string, s Settings) {
-	c := "0"
-	if s.Compress {
-		c = "1"
+// saveSettingsTo пишет настройки; пароли - только в защищённом виде. Если защитить не удалось,
+// пароли не сохраняются (открытым текстом не пишутся никогда), а возвращается ошибка.
+func saveSettingsTo(path string, s Settings) error {
+	var firstErr error
+	seal := func(plain string) string {
+		v, err := sealSecret(plain)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			return ""
+		}
+		return v
+	}
+	b2s := func(b bool) string {
+		if b {
+			return "1"
+		}
+		return "0"
 	}
 	mode := s.ProxyMode
 	if mode != modeDirect && mode != modeProxy {
 		mode = modeAuto
 	}
-	text := "Relay=" + s.Relay + "\r\nRelayPass=" + s.RelayPass + "\r\nExtra=" + s.Extra +
-		"\r\nOutDir=" + s.OutDir + "\r\nCompress=" + c + "\r\nProxyMode=" + mode +
-		"\r\nProxySel=" + itoa(s.ProxySel) + "\r\n"
+	sendPw, recvPw := "", ""
+	if s.SaveSendPw {
+		sendPw = seal(s.SendPw)
+	}
+	if s.SaveRecvPw {
+		recvPw = seal(s.RecvPw)
+	}
+	text := "Relay=" + s.Relay + "\r\nRelayPass=" + seal(s.RelayPass) + "\r\nExtra=" + s.Extra +
+		"\r\nOutDir=" + s.OutDir + "\r\nCompress=" + b2s(s.Compress) + "\r\nProxyMode=" + mode +
+		"\r\nProxySel=" + itoa(s.ProxySel) +
+		"\r\nSaveSendPw=" + b2s(s.SaveSendPw) + "\r\nSendPw=" + sendPw +
+		"\r\nSaveRecvPw=" + b2s(s.SaveRecvPw) + "\r\nRecvPw=" + recvPw + "\r\n"
 	for _, p := range s.Proxies {
-		text += "ProxyEntry=" + encodeProxy(p) + "\r\n"
+		text += "ProxyEntry=" + encodeProxy(p, seal) + "\r\n"
 	}
 	if old, err := os.ReadFile(path); err == nil && string(old) == text {
-		return
+		return firstErr
 	}
-	_ = os.WriteFile(path, []byte(text), 0644)
+	if err := os.WriteFile(path, []byte(text), 0644); err != nil {
+		return err
+	}
+	return firstErr
 }
 
 func itoa(n int) string {
@@ -210,5 +279,5 @@ func itoa(n int) string {
 	return string(b)
 }
 
-func loadSettings() Settings  { return loadSettingsFrom(iniPath()) }
-func saveSettings(s Settings) { saveSettingsTo(iniPath(), s) }
+func loadSettings() Settings        { return loadSettingsFrom(iniPath()) }
+func saveSettings(s Settings) error { return saveSettingsTo(iniPath(), s) }

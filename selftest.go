@@ -4,6 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	crand "crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,8 +69,40 @@ func transfer(s Settings, sendPw, recvPw, text string, items []string, dst strin
 	return ok && rcv.ExitCode() == 0, res, snd, rcv
 }
 
+// fakeSeal/fakeOpen - обратимая подделка защиты для систем без DPAPI (только для самотеста).
+func fakeSeal(plain string) (string, error) {
+	b := []byte(plain)
+	sum := sha256.Sum256(b)
+	out := append(append([]byte{}, sum[:4]...), b...)
+	for i := range out {
+		out[i] ^= 0x5A
+	}
+	return sealPrefix + base64.StdEncoding.EncodeToString(out), nil
+}
+
+func fakeOpen(v string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(v, sealPrefix))
+	if err != nil || len(raw) < 4 {
+		return "", errors.New("повреждённые данные")
+	}
+	for i := range raw {
+		raw[i] ^= 0x5A
+	}
+	sum := sha256.Sum256(raw[4:])
+	if !bytes.Equal(sum[:4], raw[:4]) {
+		return "", errors.New("повреждённые данные")
+	}
+	return string(raw[4:]), nil
+}
+
 func selfTest() int {
 	fails := 0
+	if _, err := platformSeal("проверка"); err != nil {
+		sealImpl, openImpl = fakeSeal, fakeOpen
+		testLogf("SECRETS: платформенной защиты здесь нет, используется тестовая подделка")
+	} else {
+		testLogf("SECRETS: используется настоящая защита системы (DPAPI)")
+	}
 	relay, err := startTestRelay()
 	if err != nil {
 		testLogf("relay start error: %v", err)
@@ -258,12 +293,15 @@ func selfTest() int {
 	{
 		tmp, _ := newWork()
 		ini := filepath.Join(tmp, "t.ini")
-		orig := Settings{Relay: "a:1", RelayPass: "x", Extra: "--no-multi", OutDir: `C:\Тест`, Compress: true,
+		orig := Settings{Relay: "a:1", RelayPass: "r&p|=%", Extra: "--no-multi", OutDir: `C:\Тест`, Compress: true,
+			SaveSendPw: true, SendPw: "s3nd pw+я",
 			ProxyMode: modeProxy, ProxySel: 1, Proxies: []ProxyCfg{
 				{Type: "socks5", Addr: "1.2.3.4:1080"},
 				{Type: "http", Addr: "h.example:8080", Auth: true, User: "u|s er", Pass: "p&a=s%s|"},
 				{Type: "socks4", Addr: "5.6.7.8:1081", Auth: true, User: "id"}}}
-		saveSettingsTo(ini, orig)
+		if err := saveSettingsTo(ini, orig); err != nil {
+			testLogf("save error: %v", err)
+		}
 		got := loadSettingsFrom(ini)
 		ini2 := filepath.Join(tmp, "old.ini")
 		_ = os.WriteFile(ini2, []byte("Relay=z\r\nProxy=socks5://bob:pw@9.9.9.9:1080\r\n"), 0644)
@@ -274,6 +312,71 @@ func selfTest() int {
 		} else {
 			fails++
 			testLogf("SETTINGS: FAIL got=%+v old=%+v", got, old)
+		}
+	}
+
+	// 7b) пароли в файле только в защищённом виде; старый открытый формат переносится; порча/чужой компьютер
+	{
+		tmp, _ := newWork()
+		ini := filepath.Join(tmp, "p.ini")
+		st := Settings{RelayPass: "relay-secret-1", SaveSendPw: true, SendPw: "send-secret-2", SaveRecvPw: false, RecvPw: "recv-secret-3",
+			ProxyMode: modeAuto, Proxies: []ProxyCfg{{Type: "http", Addr: "h:1", Auth: true, User: "u", Pass: "proxy-secret-4"}}}
+		_ = saveSettingsTo(ini, st)
+		raw, _ := os.ReadFile(ini)
+		leak := false
+		for _, w := range []string{"relay-secret-1", "send-secret-2", "recv-secret-3", "proxy-secret-4"} {
+			if strings.Contains(string(raw), w) {
+				leak = true
+			}
+		}
+		back := loadSettingsFrom(ini)
+		restored := back.RelayPass == "relay-secret-1" && back.SendPw == "send-secret-2" && back.RecvPw == "" &&
+			len(back.Proxies) == 1 && back.Proxies[0].Pass == "proxy-secret-4" && back.SecretNote == ""
+
+		// старый формат (открытый текст) читается и после сохранения больше не лежит открытым
+		legacy := filepath.Join(tmp, "legacy.ini")
+		_ = os.WriteFile(legacy, []byte("RelayPass=oldplain-5\r\nProxyEntry=http|h%3A1|1|u|oldplain-6\r\n"), 0644)
+		lg := loadSettingsFrom(legacy)
+		legacyOK := lg.RelayPass == "oldplain-5" && len(lg.Proxies) == 1 && lg.Proxies[0].Pass == "oldplain-6" && lg.SecretNote == ""
+		_ = saveSettingsTo(legacy, lg)
+		raw2, _ := os.ReadFile(legacy)
+		if strings.Contains(string(raw2), "oldplain-5") || strings.Contains(string(raw2), "oldplain-6") {
+			legacyOK = false
+		}
+
+		// порча защищённого значения (так же выглядит файл с другого компьютера)
+		lines := strings.Split(string(raw), "\r\n")
+		for i, l := range lines {
+			if strings.HasPrefix(l, "SendPw="+sealPrefix) {
+				r := []rune(l)
+				mid := len(r) - 12
+				if r[mid] == 'A' {
+					r[mid] = 'B'
+				} else {
+					r[mid] = 'A'
+				}
+				lines[i] = string(r)
+			}
+		}
+		bad := filepath.Join(tmp, "bad.ini")
+		_ = os.WriteFile(bad, []byte(strings.Join(lines, "\r\n")), 0644)
+		bd := loadSettingsFrom(bad)
+		tamperOK := bd.SendPw == "" && bd.SecretNote != "" && bd.RelayPass == "relay-secret-1"
+
+		// если защита недоступна, пароли не пишутся вообще (и не открытым текстом)
+		realSeal, realOpen := sealImpl, openImpl
+		sealImpl = func(string) (string, error) { return "", errors.New("нет защиты") }
+		noSeal := filepath.Join(tmp, "noseal.ini")
+		errSave := saveSettingsTo(noSeal, st)
+		raw3, _ := os.ReadFile(noSeal)
+		sealImpl, openImpl = realSeal, realOpen
+		noPlain := errSave != nil && !strings.Contains(string(raw3), "secret")
+
+		if !leak && restored && legacyOK && tamperOK && noPlain {
+			testLogf("PASSWORD PROTECTION (no plaintext, legacy migration, tamper, no-seal): OK")
+		} else {
+			fails++
+			testLogf("PASSWORD PROTECTION: FAIL leak=%v restored=%v legacy=%v tamper=%v noPlain=%v", leak, restored, legacyOK, tamperOK, noPlain)
 		}
 	}
 
