@@ -24,16 +24,38 @@ const (
 var archiveNameRe = regexp.MustCompile(`^crocau-[0-9a-f]{8}\.crocau\.zip$`)
 
 // Форматы, которые уже сжаты: кладём в архив без сжатия.
-var storedExt = map[string]bool{
-	".zip": true, ".rar": true, ".7z": true, ".gz": true, ".bz2": true, ".xz": true, ".zst": true,
-	".lz4": true, ".lzma": true, ".cab": true, ".tgz": true, ".tbz": true, ".tbz2": true, ".txz": true,
-	".jar": true, ".apk": true, ".docx": true, ".xlsx": true, ".pptx": true, ".odt": true, ".ods": true,
-	".odp": true, ".epub": true, ".msi": true, ".deb": true, ".rpm": true, ".dmg": true,
-	".mp3": true, ".aac": true, ".m4a": true, ".ogg": true, ".oga": true, ".opus": true, ".flac": true,
-	".wma": true, ".mp4": true, ".m4v": true, ".mkv": true, ".avi": true, ".mov": true, ".wmv": true,
-	".webm": true, ".flv": true, ".mpg": true, ".mpeg": true, ".3gp": true,
-	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".heic": true, ".heif": true,
-	".avif": true, ".jxl": true, ".pdf": true, ".woff": true, ".woff2": true,
+var storedGroups = []struct {
+	Name string
+	Exts []string
+}{
+	{"архивы", []string{".zip", ".rar", ".7z", ".gz", ".bz2", ".xz", ".zst", ".lz4", ".lzma", ".cab", ".tgz", ".tbz", ".tbz2", ".txz"}},
+	{"пакеты и документы", []string{".jar", ".apk", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".epub", ".pdf", ".msi", ".deb", ".rpm", ".dmg", ".woff", ".woff2"}},
+	{"аудио", []string{".mp3", ".aac", ".m4a", ".ogg", ".oga", ".opus", ".flac", ".wma"}},
+	{"видео", []string{".mp4", ".m4v", ".mkv", ".avi", ".mov", ".wmv", ".webm", ".flv", ".mpg", ".mpeg", ".3gp"}},
+	{"изображения", []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".avif", ".jxl"}},
+}
+
+var storedExt = func() map[string]bool {
+	m := map[string]bool{}
+	for _, g := range storedGroups {
+		for _, e := range g.Exts {
+			m[e] = true
+		}
+	}
+	return m
+}()
+
+// smartCompressHint - текст всплывающей подсказки к галочке «Умное сжатие».
+func smartCompressHint() string {
+	var sb strings.Builder
+	sb.WriteString("Умное сжатие: текст и файлы упаковываются в один архив перед отправкой\r\n")
+	sb.WriteString("(быстрее для больших файлов и множества мелких). Уже сжатые форматы\r\n")
+	sb.WriteString("не пережимаются, а кладутся в архив как есть:\r\n")
+	for _, g := range storedGroups {
+		sb.WriteString(g.Name + ": " + strings.Join(g.Exts, " ") + "\r\n")
+	}
+	sb.WriteString("Остальные файлы проверяются пробным сжатием: если выигрыш мал, они тоже кладутся без сжатия.")
+	return sb.String()
 }
 
 // isIncompressible: по расширению, а для остальных - пробным сжатием начала файла.

@@ -20,6 +20,53 @@ func crlf(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\n", "\r\n")
 }
 
+const settingsInfoText = "Настройки хранятся в crocau.ini рядом с программой. Пароли (прокси, relay и отмеченные «запомнить» " +
+	"пароли передачи) сохраняются только в зашифрованном виде. Без мастер-пароля защита привязана к вашей учётной записи " +
+	"Windows на этом компьютере (на другом компьютере пароли придётся ввести заново). С мастер-паролем пароли открываются " +
+	"на любом компьютере, но мастер-пароль спрашивается при запуске и его нельзя восстановить."
+
+// promptPassword показывает окно ввода пароля (при confirm - с повтором). Возвращает пароль и признак "нажали OK".
+func promptPassword(owner walk.Form, title, message string, confirm bool, okText, cancelText string) (string, bool) {
+	var dlg *walk.Dialog
+	var pw1, pw2 *walk.LineEdit
+	var okBtn, cancelBtn *walk.PushButton
+	result, accepted := "", false
+	children := []Widget{
+		Label{Text: message},
+		LineEdit{AssignTo: &pw1, PasswordMode: true},
+	}
+	if confirm {
+		children = append(children, Label{Text: "Повторите:"}, LineEdit{AssignTo: &pw2, PasswordMode: true})
+	}
+	children = append(children, Composite{
+		Layout: HBox{MarginsZero: true},
+		Children: []Widget{
+			HSpacer{},
+			PushButton{AssignTo: &okBtn, Text: okText, OnClicked: func() {
+				if confirm && pw1.Text() != pw2.Text() {
+					walk.MsgBox(dlg, title, "Пароли не совпадают.", walk.MsgBoxIconWarning)
+					return
+				}
+				result, accepted = pw1.Text(), true
+				dlg.Accept()
+			}},
+			PushButton{AssignTo: &cancelBtn, Text: cancelText, OnClicked: func() { dlg.Cancel() }},
+		},
+	})
+	if _, err := (Dialog{
+		AssignTo:      &dlg,
+		Title:         title,
+		DefaultButton: &okBtn,
+		CancelButton:  &cancelBtn,
+		MinSize:       Size{Width: 380, Height: 150},
+		Layout:        VBox{},
+		Children:      children,
+	}).Run(owner); err != nil {
+		return "", false
+	}
+	return result, accepted
+}
+
 var proxyTypeNames = []string{"socks5", "socks4", "http"}
 
 func proxyTypeIndex(t string) int {
@@ -52,30 +99,53 @@ func shortErr(err error) string {
 
 func guiMain(test bool) int {
 	st := loadSettings()
+	if st.Locked {
+		if st.MasterSalt == "" || test {
+			settingsReadOnly = true
+		} else {
+			for {
+				pw, ok := promptPassword(nil, "crocau", "Мастер-пароль для сохранённых настроек:", false, "Разблокировать", "Пропустить")
+				if !ok {
+					settingsReadOnly = true
+					break
+				}
+				if err := masterUnlock(pw, st.MasterSalt, st.MasterCheck); err != nil {
+					walk.MsgBox(nil, "crocau", err.Error(), walk.MsgBoxIconWarning)
+					continue
+				}
+				st = loadSettings()
+				break
+			}
+		}
+	}
 	var (
-		mw          *walk.MainWindow
-		sendText    *walk.TextEdit
-		fileList    *walk.ListBox
-		sendPw      *walk.LineEdit
-		compressCB  *walk.CheckBox
-		saveSendCB  *walk.CheckBox
-		saveRecvCB  *walk.CheckBox
-		recvPw      *walk.LineEdit
-		outLE       *walk.LineEdit
-		recvText    *walk.TextEdit
-		relayLE     *walk.LineEdit
-		relayPassLE *walk.LineEdit
-		extraLE     *walk.LineEdit
-		logTE       *walk.TextEdit
-		sendBtn     *walk.PushButton
-		recvBtn     *walk.PushButton
-		stopBtn     *walk.PushButton
-		addBtn      *walk.PushButton
-		checkBtn    *walk.PushButton
-		modeDirRB   *walk.RadioButton
-		modeAutoRB  *walk.RadioButton
-		modeProxyRB *walk.RadioButton
-		directLbl   *walk.Label
+		mw              *walk.MainWindow
+		sendText        *walk.TextEdit
+		fileList        *walk.ListBox
+		sendPw          *walk.LineEdit
+		compressCB      *walk.CheckBox
+		saveSendCB      *walk.CheckBox
+		saveRecvCB      *walk.CheckBox
+		recvPw          *walk.LineEdit
+		outLE           *walk.LineEdit
+		recvText        *walk.TextEdit
+		relayLE         *walk.LineEdit
+		relayPassLE     *walk.LineEdit
+		extraLE         *walk.LineEdit
+		logTE           *walk.TextEdit
+		sendBtn         *walk.PushButton
+		recvBtn         *walk.PushButton
+		stopBtn         *walk.PushButton
+		addBtn          *walk.PushButton
+		checkBtn        *walk.PushButton
+		modeDirRB       *walk.RadioButton
+		modeAutoRB      *walk.RadioButton
+		modeProxyRB     *walk.RadioButton
+		directLbl       *walk.Label
+		tabs            *walk.TabWidget
+		masterStatusLbl *walk.Label
+		masterSetBtn    *walk.PushButton
+		masterOffBtn    *walk.PushButton
 	)
 	var items []string
 	var curJob *Job
@@ -374,6 +444,59 @@ func guiMain(test bool) int {
 		begin(j, "recv", out, created)
 	}
 
+	// ---------- мастер-пароль ----------
+	refreshMasterUI := func() {
+		switch {
+		case settingsReadOnly:
+			_ = masterStatusLbl.SetText("Не введён: в этом сеансе настройки не сохраняются")
+			masterSetBtn.SetEnabled(false)
+			masterOffBtn.SetEnabled(false)
+		case vaultIsMaster():
+			_ = masterStatusLbl.SetText("Включён (переносимо, спрашивается при запуске)")
+			_ = masterSetBtn.SetText("Сменить мастер-пароль...")
+			masterSetBtn.SetEnabled(true)
+			masterOffBtn.SetEnabled(true)
+		default:
+			_ = masterStatusLbl.SetText("Выключен (защита привязана к этому компьютеру)")
+			_ = masterSetBtn.SetText("Задать мастер-пароль...")
+			masterSetBtn.SetEnabled(true)
+			masterOffBtn.SetEnabled(false)
+		}
+	}
+	masterSet := func() {
+		if settingsReadOnly {
+			return
+		}
+		pw, ok := promptPassword(mw, "Мастер-пароль", "Новый мастер-пароль (не короче 6 символов):", true, "OK", "Отмена")
+		if !ok {
+			return
+		}
+		if utf8.RuneCountInString(pw) < 6 {
+			warn("Мастер-пароль должен быть не короче 6 символов.")
+			return
+		}
+		if err := masterEnable(pw); err != nil {
+			warn(err.Error())
+			return
+		}
+		saveNow(collect())
+		refreshMasterUI()
+		setLog("Мастер-пароль включён: сохранённые пароли зашифрованы им и открываются на любом компьютере. Не забудьте его - восстановить нельзя.")
+	}
+	masterOff := func() {
+		if settingsReadOnly || !vaultIsMaster() {
+			return
+		}
+		if walk.MsgBox(mw, "Мастер-пароль", "Выключить мастер-пароль? Сохранённые пароли будут привязаны к этому компьютеру и перестанут открываться на других.",
+			walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) != walk.DlgCmdYes {
+			return
+		}
+		masterDisable()
+		saveNow(collect())
+		refreshMasterUI()
+		setLog("Мастер-пароль выключен.")
+	}
+
 	// ---------- проверка соединения ----------
 	showCheck := func(routes []Route, rowIdx []int, relays []string, res [][]CheckResult) {
 		var sb strings.Builder
@@ -450,12 +573,12 @@ func guiMain(test bool) int {
 			Children: []Widget{
 				RadioButton{AssignTo: &r.sel, MaxSize: Size{Width: 22}, OnClicked: func() { selectRow(i) }},
 				ComboBox{AssignTo: &r.typ, Model: []string{"SOCKS5", "SOCKS4", "HTTP"}, CurrentIndex: 0, MaxSize: Size{Width: 90}},
-				LineEdit{AssignTo: &r.addr, CueBanner: "адрес:порт", MinSize: Size{Width: 150}},
+				LineEdit{AssignTo: &r.addr, CueBanner: "адрес:порт", MinSize: Size{Width: 120}},
 				CheckBox{AssignTo: &r.auth, Text: "логин", OnCheckedChanged: func() { updateAuth(i) }},
-				LineEdit{AssignTo: &r.user, CueBanner: "логин", MaxSize: Size{Width: 90}, Enabled: false},
-				LineEdit{AssignTo: &r.pass, CueBanner: "пароль", PasswordMode: true, MaxSize: Size{Width: 90}, Enabled: false},
+				LineEdit{AssignTo: &r.user, CueBanner: "логин", MinSize: Size{Width: 60}, MaxSize: Size{Width: 100}, Enabled: false},
+				LineEdit{AssignTo: &r.pass, CueBanner: "пароль", PasswordMode: true, MinSize: Size{Width: 60}, MaxSize: Size{Width: 100}, Enabled: false},
 				PushButton{Text: "−", MaxSize: Size{Width: 28}, OnClicked: func() { removeRow(i) }},
-				Label{AssignTo: &r.status, MinSize: Size{Width: 120}},
+				Label{AssignTo: &r.status, MinSize: Size{Width: 100}},
 			},
 		})
 	}
@@ -463,23 +586,24 @@ func guiMain(test bool) int {
 	err := MainWindow{
 		AssignTo: &mw,
 		Title:    "crocau - передача файлов, папок и текста",
-		MinSize:  Size{Width: 760, Height: 660},
-		Size:     Size{Width: 800, Height: 720},
+		MinSize:  Size{Width: 650, Height: 600},
+		Size:     Size{Width: 740, Height: 660},
 		Layout:   VBox{},
 		Children: []Widget{
 			TabWidget{
+				AssignTo: &tabs,
 				Pages: []TabPage{
 					{
 						Title:  "Отправить",
 						Layout: VBox{},
 						Children: []Widget{
 							Label{Text: "Текст (необязательно):"},
-							TextEdit{AssignTo: &sendText, VScroll: true, MinSize: Size{Height: 90}},
+							TextEdit{AssignTo: &sendText, VScroll: true, MinSize: Size{Height: 60}},
 							Label{Text: "Файлы и папки (необязательно; можно перетащить в окно):"},
 							Composite{
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
-									ListBox{AssignTo: &fileList, MultiSelection: true, MinSize: Size{Height: 100}},
+									ListBox{AssignTo: &fileList, MultiSelection: true, MinSize: Size{Height: 70}},
 									Composite{
 										Layout: VBox{MarginsZero: true},
 										Children: []Widget{
@@ -526,16 +650,16 @@ func guiMain(test bool) int {
 									},
 								},
 							},
-							CheckBox{AssignTo: &compressCB, Text: "Сжать перед отправкой (текст и файлы; быстрее для больших файлов и множества мелких; уже сжатые форматы не пережимаются)", Checked: st.Compress},
+							CheckBox{AssignTo: &compressCB, Text: "Умное сжатие", ToolTipText: smartCompressHint(), Checked: st.Compress},
 							Composite{
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
-									Label{Text: "Пароль (от 3 символов):"},
-									LineEdit{AssignTo: &sendPw, Text: st.SendPw, MaxSize: Size{Width: 160}},
+									Label{Text: "Пароль:", ToolTipText: "От 3 символов"},
+									LineEdit{AssignTo: &sendPw, Text: st.SendPw, MinSize: Size{Width: 90}, MaxSize: Size{Width: 160}, ToolTipText: "Пароль передачи: от 3 символов"},
 									CheckBox{AssignTo: &saveSendCB, Text: "запомнить", Checked: st.SaveSendPw},
 									PushButton{Text: "Случайный", OnClicked: func() { _ = sendPw.SetText(randomPassword()) }},
 									HSpacer{},
-									PushButton{AssignTo: &sendBtn, Text: "Отправить", MinSize: Size{Width: 130}, OnClicked: doSend},
+									PushButton{AssignTo: &sendBtn, Text: "Отправить", MinSize: Size{Width: 110}, OnClicked: doSend},
 								},
 							},
 						},
@@ -553,7 +677,7 @@ func guiMain(test bool) int {
 									HSpacer{},
 								},
 							},
-							Label{Text: "Папка для сохранения файлов (архивы распаковываются автоматически):"},
+							Label{Text: "Папка для сохранения (архивы распаковываются сами):"},
 							Composite{
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
@@ -571,7 +695,7 @@ func guiMain(test bool) int {
 							Composite{
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
-									TextEdit{AssignTo: &recvText, ReadOnly: true, VScroll: true, MinSize: Size{Height: 110}},
+									TextEdit{AssignTo: &recvText, ReadOnly: true, VScroll: true, MinSize: Size{Height: 70}},
 									Composite{
 										Layout: VBox{MarginsZero: true},
 										Children: []Widget{
@@ -588,7 +712,7 @@ func guiMain(test bool) int {
 							Composite{
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
-									PushButton{AssignTo: &recvBtn, Text: "Получить", MinSize: Size{Width: 130}, OnClicked: doReceive},
+									PushButton{AssignTo: &recvBtn, Text: "Получить", MinSize: Size{Width: 110}, OnClicked: doReceive},
 									HSpacer{},
 								},
 							},
@@ -607,7 +731,7 @@ func guiMain(test bool) int {
 									RadioButton{AssignTo: &modeProxyRB, Text: "Только прокси (отмеченный кружком)", OnClicked: func() { setMode(modeProxy) }},
 								},
 							},
-							Label{Text: "Прокси (тип, адрес:порт, при необходимости логин и пароль). SOCKS4 - с расширением 4a:"},
+							Label{Text: "Прокси: тип, адрес:порт, логин и пароль (по галочке)", ToolTipText: "SOCKS4 работает с расширением 4a (имена серверов передаются прокси)"},
 						}, proxyRowWidgets...), []Widget{
 							Composite{
 								Layout: HBox{MarginsZero: true},
@@ -625,20 +749,29 @@ func guiMain(test bool) int {
 						Title:  "Настройки",
 						Layout: VBox{},
 						Children: []Widget{
-							Label{Text: "Адрес relay (host:порт). Пусто = автоматический выбор из публичных relay croc:"},
+							Label{Text: "Адрес relay (host:порт); пусто = публичные relay croc:"},
 							LineEdit{AssignTo: &relayLE, Text: st.Relay},
 							Label{Text: "Пароль relay (пусто = по умолчанию):"},
 							LineEdit{AssignTo: &relayPassLE, Text: st.RelayPass},
-							Label{Text: "Доп. общие ключи croc через пробел (например: --internal-dns --no-multi):"},
+							Label{Text: "Доп. ключи croc через пробел (например: --no-multi):"},
 							LineEdit{AssignTo: &extraLE, Text: st.Extra},
-							Label{Text: "Настройки хранятся в crocau.ini рядом с программой. Пароли (прокси, relay и отмеченные «запомнить» пароли передачи) сохраняются только в зашифрованном виде, привязанном к вашей учётной записи Windows на этом компьютере; на другом компьютере их придётся ввести заново."},
-							VSpacer{},
+							Label{Text: "Мастер-пароль (по желанию):"},
+							Label{AssignTo: &masterStatusLbl},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									PushButton{AssignTo: &masterSetBtn, Text: "Задать мастер-пароль...", OnClicked: masterSet},
+									PushButton{AssignTo: &masterOffBtn, Text: "Выключить", OnClicked: masterOff},
+									HSpacer{},
+								},
+							},
+							TextEdit{ReadOnly: true, VScroll: true, MinSize: Size{Height: 60}, Text: settingsInfoText},
 						},
 					},
 				},
 			},
 			Label{Text: "Ход передачи:"},
-			TextEdit{AssignTo: &logTE, ReadOnly: true, VScroll: true, MinSize: Size{Height: 150},
+			TextEdit{AssignTo: &logTE, ReadOnly: true, VScroll: true, MinSize: Size{Height: 90},
 				Font: Font{Family: "Consolas", PointSize: 9}},
 			Composite{
 				Layout: HBox{MarginsZero: true},
@@ -672,11 +805,22 @@ func guiMain(test bool) int {
 		te.SetMaxLength(0x7FFFFFFE)
 	}
 
+	// Иконка окна - из ресурсов exe (rsrc: манифест = ID 1, группа иконок = ID 2).
+	icon, iconErr := walk.NewIconFromResourceId(2)
+	if iconErr == nil {
+		_ = mw.SetIcon(icon)
+	}
+
 	applyProxies(st.Proxies, st.ProxySel)
 	setMode(st.ProxyMode)
 	if st.SecretNote != "" {
 		setLog(st.SecretNote)
 	}
+	if settingsReadOnly && !test {
+		setLog("Мастер-пароль не введён: сохранённые пароли недоступны, настройки в этом сеансе не сохраняются.")
+	}
+	refreshMasterUI()
+	widenTooltips(560, 30000)
 
 	win.DragAcceptFiles(mw.Handle(), true)
 	mw.DropFiles().Attach(func(files []string) { addPaths(files) })
@@ -701,6 +845,7 @@ func guiMain(test bool) int {
 				})
 				<-ch
 			}, guiHooks{
+				iconErr:     iconErr,
 				setRelay:    func(s string) { _ = relayLE.SetText(s) },
 				setSendText: func(s string) { _ = sendText.SetText(s) },
 				addFiles:    addPaths,
@@ -711,6 +856,59 @@ func guiMain(test bool) int {
 				setOut:      func(s string) { _ = outLE.SetText(s) },
 				recv:        doReceive,
 				recvText:    func() string { return recvText.Text() },
+				minSizeCheck: func() string {
+					_ = tabs.SetCurrentIndex(0)
+					var problems, sizes []string
+					for i := 0; i < 4; i++ {
+						_ = tabs.SetCurrentIndex(i)
+						_ = mw.SetBounds(walk.Rectangle{X: 20, Y: 20, Width: 900, Height: 800})
+						_ = mw.SetBounds(walk.Rectangle{X: 20, Y: 20, Width: 650, Height: 600})
+						b := mw.Bounds()
+						sizes = append(sizes, fmt.Sprintf("%dx%d", b.Width, b.Height))
+						if b.Width > 652 || b.Height > 602 {
+							problems = append(problems, fmt.Sprintf("tab %d: %dx%d", i, b.Width, b.Height))
+						}
+					}
+					_ = tabs.SetCurrentIndex(0)
+					_ = mw.SetBounds(walk.Rectangle{X: 20, Y: 20, Width: 800, Height: 700})
+					testLogf("MINSIZE per tab at 650x600 request: %s", strings.Join(sizes, ", "))
+					return strings.Join(problems, "; ")
+				},
+				masterUITest: func() string {
+					if err := masterEnable("test-master-1"); err != nil {
+						return err.Error()
+					}
+					refreshMasterUI()
+					if !strings.Contains(masterStatusLbl.Text(), "Включён") || !masterOffBtn.Enabled() {
+						masterDisable()
+						return "enabled state not shown"
+					}
+					_ = sendPw.SetText("mpw")
+					saveSendCB.SetChecked(true)
+					tmp := filepath.Join(os.TempDir(), "crocau-gui-master.ini")
+					if err := saveSettingsTo(tmp, collect()); err != nil {
+						masterDisable()
+						return "save failed: " + err.Error()
+					}
+					masterDisable()
+					locked := loadSettingsFrom(tmp)
+					if !locked.Locked || locked.SendPw != "" {
+						return "file not locked after restart"
+					}
+					if err := masterUnlock("test-master-1", locked.MasterSalt, locked.MasterCheck); err != nil {
+						return "unlock failed: " + err.Error()
+					}
+					back := loadSettingsFrom(tmp)
+					_ = os.Remove(tmp)
+					masterDisable()
+					refreshMasterUI()
+					if back.SendPw != "mpw" || !strings.Contains(masterStatusLbl.Text(), "Выключен") {
+						return "restore failed"
+					}
+					_ = sendPw.SetText("")
+					saveSendCB.SetChecked(false)
+					return ""
+				},
 				proxyRoundTrip: func() string {
 					want := []ProxyCfg{
 						{Type: "socks5", Addr: "1.1.1.1:1080"},
@@ -810,12 +1008,14 @@ func longTestText(head string) string {
 }
 
 type guiHooks struct {
+	iconErr                                             error
 	setRelay, setSendText, setSendPw, setRecvPw, setOut func(string)
 	addFiles                                            func([]string)
 	setCompress                                         func(bool)
 	send, recv                                          func()
 	recvText                                            func() string
 	proxyRoundTrip                                      func() string
+	masterUITest, minSizeCheck                          func() string
 }
 
 // guiTestSteps выполняется в отдельной горутине; всё, что трогает окно, идёт через ui().
@@ -847,6 +1047,13 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 		return 1
 	}
 
+	if h.iconErr == nil {
+		testLogf("ICON RESOURCE (embedded in exe, loaded for window): OK")
+	} else {
+		fails++
+		testLogf("ICON RESOURCE: FAIL %v", h.iconErr)
+	}
+
 	// 0) строки прокси: добавление, удаление, выбор, сохранение
 	var rt string
 	ui(func() { rt = h.proxyRoundTrip() })
@@ -855,6 +1062,22 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 	} else {
 		fails++
 		testLogf("GUI PROXY ROWS: FAIL %s", rt)
+	}
+
+	var mt, ms string
+	ui(func() { mt = h.masterUITest() })
+	if mt == "" {
+		testLogf("GUI MASTER PASSWORD (enable/lock/unlock/disable): OK")
+	} else {
+		fails++
+		testLogf("GUI MASTER PASSWORD: FAIL %s", mt)
+	}
+	ui(func() { ms = h.minSizeCheck() })
+	if ms == "" {
+		testLogf("GUI MIN SIZE 650x600 on every tab: OK")
+	} else {
+		fails++
+		testLogf("GUI MIN SIZE: FAIL %s", ms)
 	}
 
 	testLogf("step0: starting relay")

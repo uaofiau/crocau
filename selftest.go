@@ -295,7 +295,7 @@ func selfTest() int {
 		ini := filepath.Join(tmp, "t.ini")
 		orig := Settings{Relay: "a:1", RelayPass: "r&p|=%", Extra: "--no-multi", OutDir: `C:\Тест`, Compress: true,
 			SaveSendPw: true, SendPw: "s3nd pw+я",
-			ProxyMode: modeProxy, ProxySel: 1, Proxies: []ProxyCfg{
+			ProxyMode: modeProxy, ProxySel: 1, Protect: "account", Proxies: []ProxyCfg{
 				{Type: "socks5", Addr: "1.2.3.4:1080"},
 				{Type: "http", Addr: "h.example:8080", Auth: true, User: "u|s er", Pass: "p&a=s%s|"},
 				{Type: "socks4", Addr: "5.6.7.8:1081", Auth: true, User: "id"}}}
@@ -377,6 +377,106 @@ func selfTest() int {
 		} else {
 			fails++
 			testLogf("PASSWORD PROTECTION: FAIL leak=%v restored=%v legacy=%v tamper=%v noPlain=%v", leak, restored, legacyOK, tamperOK, noPlain)
+		}
+	}
+
+	// 7c) мастер-пароль: шифрование, блокировка, неверный пароль, переносимость, смена, отключение, режим "только чтение"
+	{
+		tmp, _ := newWork()
+		ini := filepath.Join(tmp, "m.ini")
+		base := Settings{RelayPass: "relay-secret-1", SaveSendPw: true, SendPw: "send-secret-2", ProxyMode: modeAuto,
+			Proxies: []ProxyCfg{{Type: "http", Addr: "h:1", Auth: true, User: "u", Pass: "proxy-secret-4"}}}
+		_ = saveSettingsTo(ini, base) // сначала защита системой
+		loaded := loadSettingsFrom(ini)
+		migrateStart := loaded.SendPw == "send-secret-2"
+		if err := masterEnable("мастер-пароль-1"); err != nil {
+			testLogf("masterEnable: %v", err)
+		}
+		_ = saveSettingsTo(ini, loaded) // пере-шифровано мастер-паролем
+		raw, _ := os.ReadFile(ini)
+		txt := string(raw)
+		formatOK := strings.Contains(txt, "Protect=master") && strings.Contains(txt, "MasterSalt=") &&
+			strings.Contains(txt, "MasterCheck="+mkPrefix) && !strings.Contains(txt, sealPrefix) &&
+			!strings.Contains(txt, "secret-")
+		// "перезапуск": сейф закрыт
+		masterDisable()
+		lk := loadSettingsFrom(ini)
+		lockedOK := lk.Locked && lk.Protect == "master" && lk.SendPw == "" && lk.RelayPass == "" && lk.SecretNote == "" &&
+			len(lk.Proxies) == 1 && lk.Proxies[0].Addr == "h:1" && lk.Proxies[0].Pass == ""
+		wrongOK := masterUnlock("не тот пароль", lk.MasterSalt, lk.MasterCheck) == errWrongMaster && !vaultUnlocked()
+		rightErr := masterUnlock("мастер-пароль-1", lk.MasterSalt, lk.MasterCheck)
+		un := loadSettingsFrom(ini)
+		unlockOK := rightErr == nil && !un.Locked && un.SendPw == "send-secret-2" && un.RelayPass == "relay-secret-1" &&
+			len(un.Proxies) == 1 && un.Proxies[0].Pass == "proxy-secret-4"
+		// переносимость: копия файла в другой папке открывается тем же паролем
+		other := filepath.Join(tmp, "elsewhere.ini")
+		_ = os.WriteFile(other, raw, 0644)
+		masterDisable()
+		lk2 := loadSettingsFrom(other)
+		portOK := masterUnlock("мастер-пароль-1", lk2.MasterSalt, lk2.MasterCheck) == nil && loadSettingsFrom(other).SendPw == "send-secret-2"
+		// смена мастер-пароля
+		_ = masterEnable("новый-пароль-2")
+		_ = saveSettingsTo(ini, un)
+		raw2, _ := os.ReadFile(ini)
+		masterDisable()
+		lk3 := loadSettingsFrom(ini)
+		changeOK := string(raw2) != txt && masterUnlock("мастер-пароль-1", lk3.MasterSalt, lk3.MasterCheck) == errWrongMaster &&
+			masterUnlock("новый-пароль-2", lk3.MasterSalt, lk3.MasterCheck) == nil && loadSettingsFrom(ini).SendPw == "send-secret-2"
+		// порча значения
+		lines := strings.Split(string(raw2), "\r\n")
+		for i, l := range lines {
+			if strings.HasPrefix(l, "SendPw="+mkPrefix) {
+				r := []rune(l)
+				mid := len(r) - 12
+				if r[mid] == 'A' {
+					r[mid] = 'B'
+				} else {
+					r[mid] = 'A'
+				}
+				lines[i] = string(r)
+			}
+		}
+		bad := filepath.Join(tmp, "bad.ini")
+		_ = os.WriteFile(bad, []byte(strings.Join(lines, "\r\n")), 0644)
+		bd := loadSettingsFrom(bad)
+		tamperOK := bd.SendPw == "" && bd.SecretNote != "" && bd.RelayPass == "relay-secret-1"
+		// режим "только чтение" (мастер-пароль не введён): файл не меняется
+		settingsReadOnly = true
+		before, _ := os.ReadFile(ini)
+		_ = saveSettingsGuarded(ini, Settings{})
+		after, _ := os.ReadFile(ini)
+		settingsReadOnly = false
+		roOK := bytes.Equal(before, after)
+		// отключение: пароли снова защищены системой и читаются без мастер-пароля
+		masterDisable()
+		_ = saveSettingsTo(ini, un)
+		raw3, _ := os.ReadFile(ini)
+		offOK := strings.Contains(string(raw3), "Protect=account") && strings.Contains(string(raw3), sealPrefix) &&
+			!strings.Contains(string(raw3), mkPrefix) && loadSettingsFrom(ini).SendPw == "send-secret-2"
+		masterDisable()
+		if migrateStart && formatOK && lockedOK && wrongOK && unlockOK && portOK && changeOK && tamperOK && roOK && offOK {
+			testLogf("MASTER PASSWORD (encrypt, lock, wrong pw, portable, change, tamper, read-only, disable): OK")
+		} else {
+			fails++
+			testLogf("MASTER PASSWORD: FAIL migrate=%v format=%v locked=%v wrong=%v unlock=%v portable=%v change=%v tamper=%v readonly=%v off=%v",
+				migrateStart, formatOK, lockedOK, wrongOK, unlockOK, portOK, changeOK, tamperOK, roOK, offOK)
+		}
+	}
+
+	// 7d) подсказка к умному сжатию перечисляет все не сжимаемые расширения
+	{
+		h := smartCompressHint()
+		all := true
+		for e := range storedExt {
+			if !strings.Contains(h, e) {
+				all = false
+			}
+		}
+		if all && len(storedExt) > 40 && strings.Count(h, "\r\n") >= 6 {
+			testLogf("SMART COMPRESSION HINT (%d extensions listed): OK", len(storedExt))
+		} else {
+			fails++
+			testLogf("SMART COMPRESSION HINT: FAIL")
 		}
 	}
 

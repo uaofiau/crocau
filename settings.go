@@ -37,9 +37,15 @@ type Settings struct {
 	RecvPw     string
 	// SecretNote - предупреждение при загрузке (не сохраняется в файл).
 	SecretNote string
-	ProxyMode  string
-	ProxySel   int
-	Proxies    []ProxyCfg
+	// Мастер-пароль: Protect = "account" (по умолчанию) или "master"; соль и контрольное значение лежат в файле.
+	Protect     string
+	MasterSalt  string
+	MasterCheck string
+	// Locked - файл защищён мастер-паролем, а он не введён (не сохраняется в файл).
+	Locked    bool
+	ProxyMode string
+	ProxySel  int
+	Proxies   []ProxyCfg
 }
 
 func exeDir() string {
@@ -75,22 +81,22 @@ func encodeProxy(p ProxyCfg, seal func(string) string) string {
 	return strings.Join(parts, "|")
 }
 
-// decodeProxy: lost=true, если пароль не удалось расшифровать (он тогда пустой).
-func decodeProxy(v string) (p ProxyCfg, ok bool, lost bool) {
+// decodeProxy: lost != nil, если пароль не удалось расшифровать (он тогда пустой).
+func decodeProxy(v string) (p ProxyCfg, ok bool, lost error) {
 	parts := strings.Split(v, "|")
 	if len(parts) != 5 {
-		return ProxyCfg{}, false, false
+		return ProxyCfg{}, false, nil
 	}
 	for i := range parts {
 		u, err := url.QueryUnescape(parts[i])
 		if err != nil {
-			return ProxyCfg{}, false, false
+			return ProxyCfg{}, false, nil
 		}
 		parts[i] = u
 	}
 	pass, err := openSecret(parts[4])
 	if err != nil {
-		pass, lost = "", true
+		pass, lost = "", err
 	}
 	return ProxyCfg{Type: normType(parts[0]), Addr: parts[1], Auth: parts[2] == "1", User: parts[3], Pass: pass}, true, lost
 }
@@ -122,15 +128,19 @@ func legacyProxy(v string) (ProxyCfg, bool) {
 }
 
 func loadSettingsFrom(path string) Settings {
-	s := Settings{OutDir: filepath.Join(exeDir(), "received"), ProxyMode: modeAuto}
+	s := Settings{OutDir: filepath.Join(exeDir(), "received"), ProxyMode: modeAuto, Protect: "account"}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return s
 	}
 	legacy := ""
-	lostAny := false
+	lostAny, lockedAny := false, false
 	open := func(v string) string {
 		plain, err := openSecret(v)
+		if err == errLocked {
+			lockedAny = true
+			return ""
+		}
 		if err != nil {
 			lostAny = true
 			return ""
@@ -148,6 +158,14 @@ func loadSettingsFrom(path string) Settings {
 		switch k {
 		case "Relay":
 			s.Relay = v
+		case "Protect":
+			if masterMode(v) {
+				s.Protect = "master"
+			}
+		case "MasterSalt":
+			s.MasterSalt = v
+		case "MasterCheck":
+			s.MasterCheck = v
 		case "RelayPass":
 			s.RelayPass = open(v)
 		case "SaveSendPw":
@@ -181,7 +199,9 @@ func loadSettingsFrom(path string) Settings {
 		case "ProxyEntry":
 			if p, ok, lost := decodeProxy(v); ok && len(s.Proxies) < maxProxies {
 				s.Proxies = append(s.Proxies, p)
-				if lost {
+				if lost == errLocked {
+					lockedAny = true
+				} else if lost != nil {
 					lostAny = true
 				}
 			}
@@ -205,6 +225,7 @@ func loadSettingsFrom(path string) Settings {
 	if !s.SaveRecvPw {
 		s.RecvPw = ""
 	}
+	s.Locked = lockedAny || (s.Protect == "master" && !vaultUnlocked())
 	if lostAny {
 		s.SecretNote = "Не удалось расшифровать сохранённые пароли: файл настроек создан на другом компьютере " +
 			"или под другим пользователем Windows. Введите пароли заново."
@@ -243,7 +264,13 @@ func saveSettingsTo(path string, s Settings) error {
 	if s.SaveRecvPw {
 		recvPw = seal(s.RecvPw)
 	}
-	text := "Relay=" + s.Relay + "\r\nRelayPass=" + seal(s.RelayPass) + "\r\nExtra=" + s.Extra +
+	protect, masterLines := "account", ""
+	if vaultIsMaster() {
+		protect = "master"
+		masterLines = "MasterSalt=" + vaultSaltB64() + "\r\nMasterCheck=" + seal(masterCheckPlain) + "\r\n"
+	}
+	text := "Protect=" + protect + "\r\n" + masterLines +
+		"Relay=" + s.Relay + "\r\nRelayPass=" + seal(s.RelayPass) + "\r\nExtra=" + s.Extra +
 		"\r\nOutDir=" + s.OutDir + "\r\nCompress=" + b2s(s.Compress) + "\r\nProxyMode=" + mode +
 		"\r\nProxySel=" + itoa(s.ProxySel) +
 		"\r\nSaveSendPw=" + b2s(s.SaveSendPw) + "\r\nSendPw=" + sendPw +
@@ -279,5 +306,17 @@ func itoa(n int) string {
 	return string(b)
 }
 
-func loadSettings() Settings        { return loadSettingsFrom(iniPath()) }
-func saveSettings(s Settings) error { return saveSettingsTo(iniPath(), s) }
+func loadSettings() Settings { return loadSettingsFrom(iniPath()) }
+
+// settingsReadOnly: файл защищён мастер-паролем, а он не введён - в этом сеансе ничего не пишем,
+// чтобы не затереть сохранённые пароли.
+var settingsReadOnly bool
+
+func saveSettingsGuarded(path string, s Settings) error {
+	if settingsReadOnly {
+		return nil
+	}
+	return saveSettingsTo(path, s)
+}
+
+func saveSettings(s Settings) error { return saveSettingsGuarded(iniPath(), s) }

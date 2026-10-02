@@ -42,7 +42,7 @@ jobs:
       - name: Windows manifest resource
         run: |
           go install github.com/akavel/rsrc@v0.10.2
-          "$(go env GOPATH)/bin/rsrc" -manifest crocau.manifest -arch 386 -o rsrc_windows_386.syso
+          "$(go env GOPATH)/bin/rsrc" -manifest crocau.manifest -ico assets/crocau.ico -arch 386 -o rsrc_windows_386.syso
 
       - name: Build crocau.exe (windows/386, Go 1.20)
         shell: bash
