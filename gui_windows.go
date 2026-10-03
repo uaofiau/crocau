@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -146,12 +147,14 @@ func guiMain(test bool) int {
 		masterStatusLbl *walk.Label
 		masterSetBtn    *walk.PushButton
 		masterOffBtn    *walk.PushButton
+		ni              *walk.NotifyIcon
 	)
 	var items []string
 	var curJob *Job
 	var curMode, curOut string
 	var curCreated bool
 	checking := false
+	trayHidden := false
 	testExit := 0
 	testDone := make(chan int, 1)
 
@@ -442,6 +445,35 @@ func guiMain(test bool) int {
 		}
 		setLog("Ожидание отправителя...")
 		begin(j, "recv", out, created)
+	}
+
+	// ---------- трей ----------
+	// notify показывает стандартное уведомление, но только если окно свёрнуто в трей.
+	notify := func(title, msg string) {
+		if trayHidden && ni != nil {
+			_ = ni.ShowInfo(title, msg)
+		}
+	}
+	_ = notify
+	restoreFromTray := func() {
+		if ni != nil {
+			_ = ni.SetVisible(false)
+		}
+		trayHidden = false
+		mw.SetVisible(true)
+		win.ShowWindow(mw.Handle(), win.SW_RESTORE)
+		win.SetForegroundWindow(mw.Handle())
+	}
+	hideToTray := func() error {
+		if ni == nil {
+			return errors.New("значок в области уведомлений недоступен")
+		}
+		if err := ni.SetVisible(true); err != nil {
+			return err
+		}
+		trayHidden = true
+		mw.SetVisible(false)
+		return nil
 	}
 
 	// ---------- мастер-пароль ----------
@@ -787,6 +819,11 @@ func guiMain(test bool) int {
 						}
 					}},
 					HSpacer{},
+					PushButton{Text: "В трей", ToolTipText: "Свернуть в область уведомлений (значок возле часов). Вернуть окно: щелчок по значку", OnClicked: func() {
+						if err := hideToTray(); err != nil {
+							warn("Не удалось свернуть в трей: " + err.Error())
+						}
+					}},
 				},
 			},
 		},
@@ -811,6 +848,31 @@ func guiMain(test bool) int {
 		_ = mw.SetIcon(icon)
 	}
 
+	// значок в области уведомлений (виден только пока окно свёрнуто в трей)
+	if n, err := walk.NewNotifyIcon(mw); err == nil {
+		ni = n
+		if iconErr == nil {
+			_ = ni.SetIcon(icon)
+		}
+		_ = ni.SetToolTip("crocau")
+		show := walk.NewAction()
+		_ = show.SetText("Показать окно")
+		show.Triggered().Attach(restoreFromTray)
+		quit := walk.NewAction()
+		_ = quit.SetText("Выход")
+		quit.Triggered().Attach(func() {
+			restoreFromTray()
+			_ = mw.Close()
+		})
+		_ = ni.ContextMenu().Actions().Add(show)
+		_ = ni.ContextMenu().Actions().Add(quit)
+		ni.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
+			if button == walk.LeftButton {
+				restoreFromTray()
+			}
+		})
+	}
+
 	applyProxies(st.Proxies, st.ProxySel)
 	setMode(st.ProxyMode)
 	if st.SecretNote != "" {
@@ -825,6 +887,9 @@ func guiMain(test bool) int {
 	win.DragAcceptFiles(mw.Handle(), true)
 	mw.DropFiles().Attach(func(files []string) { addPaths(files) })
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
+		if ni != nil {
+			_ = ni.Dispose()
+		}
 		_ = saveSettings(collect())
 		if curJob != nil {
 			curJob.Kill()
@@ -873,6 +938,25 @@ func guiMain(test bool) int {
 					_ = mw.SetBounds(walk.Rectangle{X: 20, Y: 20, Width: 800, Height: 700})
 					testLogf("MINSIZE per tab at 650x600 request: %s", strings.Join(sizes, ", "))
 					return strings.Join(problems, "; ")
+				},
+				trayTest: func() string {
+					if ni == nil {
+						return "skip: нет значка в области уведомлений"
+					}
+					if err := hideToTray(); err != nil {
+						return "skip: " + err.Error()
+					}
+					hidden := !mw.Visible() && ni.Visible() && trayHidden
+					notifyErr := ni.ShowInfo("crocau", "Проверка уведомления")
+					restoreFromTray()
+					shown := mw.Visible() && !ni.Visible() && !trayHidden
+					if !hidden || !shown {
+						return fmt.Sprintf("hidden=%v shown=%v", hidden, shown)
+					}
+					if notifyErr != nil {
+						return "skip-notify: " + notifyErr.Error()
+					}
+					return ""
 				},
 				masterUITest: func() string {
 					if err := masterEnable("test-master-1"); err != nil {
@@ -1015,7 +1099,7 @@ type guiHooks struct {
 	send, recv                                          func()
 	recvText                                            func() string
 	proxyRoundTrip                                      func() string
-	masterUITest, minSizeCheck                          func() string
+	masterUITest, minSizeCheck, trayTest                func() string
 }
 
 // guiTestSteps выполняется в отдельной горутине; всё, что трогает окно, идёт через ui().
@@ -1071,6 +1155,17 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 	} else {
 		fails++
 		testLogf("GUI MASTER PASSWORD: FAIL %s", mt)
+	}
+	var tr string
+	ui(func() { tr = h.trayTest() })
+	switch {
+	case tr == "":
+		testLogf("GUI TRAY (hide to tray, notification, restore): OK")
+	case strings.HasPrefix(tr, "skip"):
+		testLogf("GUI TRAY: %s (в CI может не быть области уведомлений)", tr)
+	default:
+		fails++
+		testLogf("GUI TRAY: FAIL %s", tr)
 	}
 	ui(func() { ms = h.minSizeCheck() })
 	if ms == "" {
