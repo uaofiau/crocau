@@ -29,12 +29,19 @@ type Settings struct {
 	RelayPass string
 	Extra     string
 	OutDir    string
-	Compress  bool
+	// OutRel: в crocau.ini путь к папке приёма хранится относительно crocau.exe (если это возможно).
+	OutRel   bool
+	Compress bool
 	// Сохранённые пароли передачи (хранятся защищёнными, только если стоит галочка).
 	SaveSendPw bool
 	SendPw     string
 	SaveRecvPw bool
 	RecvPw     string
+	// Режим обмена в локальной сети.
+	ExchName   string
+	ExchPw     string
+	SaveExchPw bool
+	ExchAuto   bool
 	// SecretNote - предупреждение при загрузке (не сохраняется в файл).
 	SecretNote string
 	// Мастер-пароль: Protect = "account" (по умолчанию) или "master"; соль и контрольное значение лежат в файле.
@@ -48,7 +55,13 @@ type Settings struct {
 	Proxies   []ProxyCfg
 }
 
+// exeDirOverride подменяет папку программы (тесты).
+var exeDirOverride string
+
 func exeDir() string {
+	if exeDirOverride != "" {
+		return exeDirOverride
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return "."
@@ -128,7 +141,7 @@ func legacyProxy(v string) (ProxyCfg, bool) {
 }
 
 func loadSettingsFrom(path string) Settings {
-	s := Settings{OutDir: filepath.Join(exeDir(), "received"), ProxyMode: modeAuto, Protect: "account"}
+	s := Settings{OutDir: filepath.Join(exeDir(), "received"), OutRel: true, ProxyMode: modeAuto, Protect: "account"}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return s
@@ -172,6 +185,14 @@ func loadSettingsFrom(path string) Settings {
 			s.SaveSendPw = v == "1"
 		case "SendPw":
 			s.SendPw = open(v)
+		case "ExchName":
+			s.ExchName = v
+		case "ExchAuto":
+			s.ExchAuto = v == "1"
+		case "SaveExchPw":
+			s.SaveExchPw = v == "1"
+		case "ExchPw":
+			s.ExchPw = open(v)
 		case "SaveRecvPw":
 			s.SaveRecvPw = v == "1"
 		case "RecvPw":
@@ -180,6 +201,8 @@ func loadSettingsFrom(path string) Settings {
 			s.Extra = v
 		case "OutDir":
 			s.OutDir = v
+		case "OutDirRelative":
+			s.OutRel = v == "1"
 		case "Compress":
 			s.Compress = v == "1"
 		case "ProxyMode":
@@ -225,6 +248,9 @@ func loadSettingsFrom(path string) Settings {
 	if !s.SaveRecvPw {
 		s.RecvPw = ""
 	}
+	if !s.SaveExchPw {
+		s.ExchPw = ""
+	}
 	s.Locked = lockedAny || (s.Protect == "master" && !vaultUnlocked())
 	if lostAny {
 		s.SecretNote = "Не удалось расшифровать сохранённые пароли: файл настроек создан на другом компьютере " +
@@ -257,7 +283,10 @@ func saveSettingsTo(path string, s Settings) error {
 	if mode != modeDirect && mode != modeProxy {
 		mode = modeAuto
 	}
-	sendPw, recvPw := "", ""
+	sendPw, recvPw, exchPw := "", "", ""
+	if s.SaveExchPw {
+		exchPw = seal(s.ExchPw)
+	}
 	if s.SaveSendPw {
 		sendPw = seal(s.SendPw)
 	}
@@ -271,10 +300,12 @@ func saveSettingsTo(path string, s Settings) error {
 	}
 	text := "Protect=" + protect + "\r\n" + masterLines +
 		"Relay=" + s.Relay + "\r\nRelayPass=" + seal(s.RelayPass) + "\r\nExtra=" + s.Extra +
-		"\r\nOutDir=" + s.OutDir + "\r\nCompress=" + b2s(s.Compress) + "\r\nProxyMode=" + mode +
+		"\r\nOutDir=" + outDirForSave(s.OutDir, s.OutRel) + "\r\nOutDirRelative=" + b2s(s.OutRel) + "\r\nCompress=" + b2s(s.Compress) + "\r\nProxyMode=" + mode +
 		"\r\nProxySel=" + itoa(s.ProxySel) +
 		"\r\nSaveSendPw=" + b2s(s.SaveSendPw) + "\r\nSendPw=" + sendPw +
-		"\r\nSaveRecvPw=" + b2s(s.SaveRecvPw) + "\r\nRecvPw=" + recvPw + "\r\n"
+		"\r\nSaveRecvPw=" + b2s(s.SaveRecvPw) + "\r\nRecvPw=" + recvPw +
+		"\r\nExchName=" + s.ExchName + "\r\nExchAuto=" + b2s(s.ExchAuto) +
+		"\r\nSaveExchPw=" + b2s(s.SaveExchPw) + "\r\nExchPw=" + exchPw + "\r\n"
 	for _, p := range s.Proxies {
 		text += "ProxyEntry=" + encodeProxy(p, seal) + "\r\n"
 	}
@@ -320,3 +351,30 @@ func saveSettingsGuarded(path string, s Settings) error {
 }
 
 func saveSettings(s Settings) error { return saveSettingsGuarded(iniPath(), s) }
+
+// outDirForSave: при включённой галочке полный путь внутри/рядом с папкой программы записывается относительным
+// (например "received" или "..\\Загрузки"); если относительный путь построить нельзя (другой диск), остаётся полным.
+func outDirForSave(dir string, rel bool) string {
+	d := strings.TrimSpace(dir)
+	if d == "" || !rel || !filepath.IsAbs(d) {
+		return d
+	}
+	r, err := filepath.Rel(exeDir(), filepath.Clean(d))
+	if err != nil {
+		return d
+	}
+	return r
+}
+
+// resolveOutDir превращает сохранённый путь в полный: относительный отсчитывается от папки программы
+// (а не от текущей папки процесса, которая может быть любой).
+func resolveOutDir(dir string) string {
+	d := strings.TrimSpace(dir)
+	if d == "" {
+		return filepath.Join(exeDir(), "received")
+	}
+	if filepath.IsAbs(d) {
+		return filepath.Clean(d)
+	}
+	return filepath.Join(exeDir(), d)
+}

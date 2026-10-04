@@ -25,6 +25,12 @@ func main() {
 			return
 		case "--selftest":
 			os.Exit(selfTest())
+		case "--fw-install":
+			os.Exit(fwInstallMain())
+		case "--fw-remove":
+			os.Exit(fwRemoveMain())
+		case "--fwtest":
+			os.Exit(fwSelfTest())
 		case "--nettest":
 			os.Exit(netTest())
 		case "--guitest":

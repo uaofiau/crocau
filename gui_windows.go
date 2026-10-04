@@ -68,6 +68,8 @@ func promptPassword(owner walk.Form, title, message string, confirm bool, okText
 	return result, accepted
 }
 
+const destInternet = "Через интернет"
+
 var proxyTypeNames = []string{"socks5", "socks4", "http"}
 
 func proxyTypeIndex(t string) int {
@@ -148,12 +150,31 @@ func guiMain(test bool) int {
 		masterSetBtn    *walk.PushButton
 		masterOffBtn    *walk.PushButton
 		ni              *walk.NotifyIcon
+		destCB          *walk.ComboBox
+		outRelCB        *walk.CheckBox
+		exchNameLE      *walk.LineEdit
+		exchPwLE        *walk.LineEdit
+		saveExchCB      *walk.CheckBox
+		exchAutoCB      *walk.CheckBox
+		exchBtn         *walk.PushButton
+		exchStatusLbl   *walk.Label
+		fwStatusLbl     *walk.Label
+		histLB          *walk.ListBox
+		exchText        *walk.TextEdit
 	)
 	var items []string
 	var curJob *Job
 	var curMode, curOut string
 	var curCreated bool
 	checking := false
+	var exch Exchange
+	var peers []Peer
+	var history, histTexts []string
+	curLAN := false
+	hostName, _ := os.Hostname()
+	if st.ExchName == "" {
+		st.ExchName = hostName
+	}
 	trayHidden := false
 	testExit := 0
 	testDone := make(chan int, 1)
@@ -294,8 +315,11 @@ func guiMain(test bool) int {
 		return Settings{
 			Relay: relayLE.Text(), RelayPass: relayPassLE.Text(), Extra: extraLE.Text(), OutDir: outLE.Text(),
 			Compress:   compressCB.Checked(),
+			OutRel:     outRelCB.Checked(),
 			SaveSendPw: saveSendCB.Checked(), SendPw: savedPw(saveSendCB, sendPw),
-			SaveRecvPw: saveRecvCB.Checked(), RecvPw: savedPw(saveRecvCB, recvPw), ProxyMode: curProxyMode(), ProxySel: selIndex(), Proxies: collectProxies(),
+			SaveRecvPw: saveRecvCB.Checked(), RecvPw: savedPw(saveRecvCB, recvPw),
+			ExchName: strings.TrimSpace(exchNameLE.Text()), ExchAuto: exchAutoCB.Checked(),
+			SaveExchPw: saveExchCB.Checked(), ExchPw: savedPw(saveExchCB, exchPwLE), ProxyMode: curProxyMode(), ProxySel: selIndex(), Proxies: collectProxies(),
 		}
 	}
 
@@ -376,6 +400,10 @@ func guiMain(test bool) int {
 				}
 			}
 		}
+		if code != 0 && curLAN && strings.Contains(job.Log(), "could not connect") {
+			tail += "\r\nУстройство не отвечает. На нём должен быть включён режим обмена (вкладка «Обмен»), " +
+				"а брандмауэр должен пропускать порты (кнопка «Открыть порты» на том устройстве)."
+		}
 		if code != 0 && strings.Contains(job.Log(), "лимит подключений") {
 			tail += "\r\nПубличные relay ограничили подключения с вашего IP (лимит около 30 в минуту на IP; " +
 				"если обе стороны за одним IP - счёт общий). Подождите минуту и повторите. " +
@@ -412,12 +440,39 @@ func guiMain(test bool) int {
 		}
 		cur := collect()
 		saveNow(cur)
+		target := strings.TrimSpace(destCB.Text())
+		lan := target != "" && !strings.HasPrefix(target, destInternet)
+		lanAddr := ""
+		if lan {
+			a, ok := "", false
+			for _, p := range peers {
+				if p.Label() == target {
+					a, ok = p.Addr(), true
+					break
+				}
+			}
+			if !ok {
+				a, ok = parseLANAddr(target)
+			}
+			if !ok {
+				warn("Укажите IP-адрес устройства (например 192.168.1.5), выберите его из списка или выберите «Через интернет».")
+				return
+			}
+			lanAddr = a
+			cur.Relay, cur.RelayPass, cur.ProxyMode, cur.Proxies = a, "", modeDirect, nil
+		}
 		j, err := startSend(cur, pw, text, items)
 		if err != nil {
 			warn(err.Error())
 			return
 		}
-		setLog("Отправка запущена. Передайте получателю пароль и дождитесь подключения...")
+		curLAN = lan
+		if lan {
+			setLog("Отправка по локальной сети на " + lanAddr + "...\r\nНа том устройстве должен быть включён режим обмена с тем же паролем. " +
+				"Если ничего не происходит, проверьте пароль.")
+		} else {
+			setLog("Отправка запущена. Передайте получателю пароль и дождитесь подключения...")
+		}
 		begin(j, "send", "", false)
 	}
 	doReceive := func() {
@@ -443,6 +498,7 @@ func guiMain(test bool) int {
 			warn(err.Error())
 			return
 		}
+		curLAN = false
 		setLog("Ожидание отправителя...")
 		begin(j, "recv", out, created)
 	}
@@ -474,6 +530,129 @@ func guiMain(test bool) int {
 		trayHidden = true
 		mw.SetVisible(false)
 		return nil
+	}
+
+	// ---------- локальная сеть и режим обмена ----------
+	refreshPeers := func() {
+		go func() {
+			found := discoverPeers(1500*time.Millisecond, instanceID, broadcastTargets())
+			mw.Synchronize(func() {
+				peers = found
+				cur := destCB.Text()
+				items := []string{destInternet}
+				for _, p := range found {
+					items = append(items, p.Label())
+				}
+				_ = destCB.SetModel(items)
+				if cur != "" {
+					_ = destCB.SetText(cur)
+				} else {
+					_ = destCB.SetCurrentIndex(0)
+				}
+			})
+		}()
+	}
+	exchStatus := func(full string) {
+		short := full
+		if r := []rune(short); len(r) > 64 {
+			short = string(r[:64]) + "..."
+		}
+		_ = exchStatusLbl.SetText(short)
+		_ = exchStatusLbl.SetToolTipText(full)
+	}
+	refreshFW := func() {
+		go func() {
+			ok := fwPresent()
+			mw.Synchronize(func() {
+				if ok {
+					_ = fwStatusLbl.SetText("Брандмауэр: порты открыты")
+				} else {
+					_ = fwStatusLbl.SetText("Брандмауэр: порты не открыты")
+				}
+			})
+		}()
+	}
+	showHist := func() {
+		i := histLB.CurrentIndex()
+		if i >= 0 && i < len(histTexts) {
+			_ = exchText.SetText(crlf(histTexts[i]))
+		}
+	}
+	handleExch := func(ev ExchangeEvent) {
+		switch ev.Kind {
+		case "received":
+			var parts []string
+			if ev.Text != "" {
+				parts = append(parts, fmt.Sprintf("текст (%d симв.)", utf8.RuneCountInString(ev.Text)))
+			}
+			if len(ev.Names) > 0 {
+				names := ev.Names
+				more := ""
+				if len(names) > 3 {
+					more = fmt.Sprintf(" и ещё %d", len(names)-3)
+					names = names[:3]
+				}
+				parts = append(parts, "файлы: "+strings.Join(names, ", ")+more)
+			} else if ev.Files {
+				parts = append(parts, "файлы")
+			}
+			summary := strings.Join(parts, "; ")
+			if summary == "" {
+				summary = "данные"
+			}
+			history = append([]string{ev.Time.Format("15:04:05") + "  " + summary}, history...)
+			histTexts = append([]string{ev.Text}, histTexts...)
+			_ = histLB.SetModel(append([]string{}, history...))
+			_ = histLB.SetCurrentIndex(0)
+			_ = exchText.SetText(crlf(ev.Text))
+			exchStatus("Получено: " + summary)
+			notify("crocau: получено", summary)
+		default:
+			exchStatus(ev.Msg)
+		}
+	}
+	startExchange := func() {
+		pw := strings.TrimSpace(exchPwLE.Text())
+		name := strings.TrimSpace(exchNameLE.Text())
+		if name == "" {
+			name = hostName
+		}
+		saveNow(collect())
+		err := exch.Start(pw, strings.TrimSpace(outLE.Text()), name, func(ev ExchangeEvent) {
+			mw.Synchronize(func() { handleExch(ev) })
+		})
+		if err != nil {
+			warn(err.Error())
+			return
+		}
+		_ = exchBtn.SetText("Выключить обмен")
+		refreshFW()
+	}
+	toggleExchange := func() {
+		if exch.Running() {
+			exch.Stop()
+			_ = exchBtn.SetText("Включить обмен")
+			exchStatus("Выключен")
+			return
+		}
+		startExchange()
+	}
+	fwAction := func(open bool) {
+		_ = fwStatusLbl.SetText("Брандмауэр: ждём подтверждение администратора...")
+		go func() {
+			var err error
+			if open {
+				err = fwEnsure()
+			} else {
+				err = fwRemove()
+			}
+			mw.Synchronize(func() {
+				if err != nil {
+					warn("Брандмауэр: " + err.Error())
+				}
+				refreshFW()
+			})
+		}()
 	}
 
 	// ---------- мастер-пароль ----------
@@ -682,6 +861,16 @@ func guiMain(test bool) int {
 									},
 								},
 							},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									Label{Text: "Куда:"},
+									ComboBox{AssignTo: &destCB, Editable: true, Model: []string{destInternet}, CurrentIndex: 0, MinSize: Size{Width: 180},
+										ToolTipText: "«Через интернет» - публичные relay. Или устройство из вашей сети (оно должно быть в режиме обмена): выберите из списка или впишите IP, например 192.168.1.5"},
+									PushButton{Text: "Найти в сети", OnClicked: refreshPeers},
+									HSpacer{},
+								},
+							},
 							CheckBox{AssignTo: &compressCB, Text: "Умное сжатие", ToolTipText: smartCompressHint(), Checked: st.Compress},
 							Composite{
 								Layout: HBox{MarginsZero: true},
@@ -713,7 +902,9 @@ func guiMain(test bool) int {
 							Composite{
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
-									LineEdit{AssignTo: &outLE, Text: st.OutDir},
+									LineEdit{AssignTo: &outLE, Text: resolveOutDir(st.OutDir)},
+									CheckBox{AssignTo: &outRelCB, Text: "от программы", Checked: st.OutRel,
+										ToolTipText: "Хранить путь папки относительно crocau.exe: папку программы можно переносить на другие устройства, и приём сразу пойдёт в её же подпапку. Если папка на другом диске, путь остаётся полным."},
 									PushButton{Text: "Обзор...", OnClicked: func() {
 										dlg := new(walk.FileDialog)
 										dlg.Title = "Папка для сохранения"
@@ -746,6 +937,56 @@ func guiMain(test bool) int {
 								Children: []Widget{
 									PushButton{AssignTo: &recvBtn, Text: "Получить", MinSize: Size{Width: 110}, OnClicked: doReceive},
 									HSpacer{},
+								},
+							},
+						},
+					},
+					{
+						Title:  "Обмен",
+						Layout: VBox{},
+						Children: []Widget{
+							Label{Text: "Принимает файлы и текст от устройств в вашей сети.", ToolTipText: "Режим непрерывного обмена: устройство остаётся на связи, другие устройства сети находят его (кнопка «Найти в сети» на вкладке «Отправить») и присылают данные с этим же паролем. Файлы сохраняются в папку со вкладки «Получить»."},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									Label{Text: "Имя:"},
+									LineEdit{AssignTo: &exchNameLE, Text: st.ExchName, MinSize: Size{Width: 80}, MaxSize: Size{Width: 130}, ToolTipText: "Так это устройство будет называться в списке у других"},
+									Label{Text: "Пароль:"},
+									LineEdit{AssignTo: &exchPwLE, Text: st.ExchPw, MinSize: Size{Width: 90}, MaxSize: Size{Width: 140}, ToolTipText: "От 8 символов, одинаковый на всех ваших устройствах. Длиннее обычного, потому что устройство слушает постоянно"},
+									CheckBox{AssignTo: &saveExchCB, Text: "запомнить", Checked: st.SaveExchPw},
+									PushButton{Text: "Случайный", OnClicked: func() { _ = exchPwLE.SetText(randomPassword() + randomPassword()) }},
+									HSpacer{},
+								},
+							},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									CheckBox{AssignTo: &exchAutoCB, Text: "Включать при запуске", Checked: st.ExchAuto, ToolTipText: "Нужен запомненный пароль"},
+									HSpacer{},
+									PushButton{AssignTo: &exchBtn, Text: "Включить обмен", MinSize: Size{Width: 130}, OnClicked: toggleExchange},
+								},
+							},
+							Label{AssignTo: &exchStatusLbl, Text: "Выключен"},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									Label{AssignTo: &fwStatusLbl, Text: "Брандмауэр: проверяем..."},
+									PushButton{Text: "Открыть порты", ToolTipText: "Создать правила Windows для crocau.exe (TCP 29009-29013, UDP 29008). Один раз попросит подтверждение администратора", OnClicked: func() { fwAction(true) }},
+									PushButton{Text: "Закрыть порты", ToolTipText: "Удалить созданные правила", OnClicked: func() { fwAction(false) }},
+									HSpacer{},
+								},
+							},
+							Label{Text: "Получено (щёлкните строку, чтобы увидеть текст):"},
+							ListBox{AssignTo: &histLB, MinSize: Size{Height: 60}, OnCurrentIndexChanged: showHist},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									TextEdit{AssignTo: &exchText, ReadOnly: true, VScroll: true, MinSize: Size{Height: 50}},
+									PushButton{Text: "Копировать", OnClicked: func() {
+										if t := exchText.Text(); t != "" {
+											_ = walk.Clipboard().SetText(t)
+										}
+									}},
 								},
 							},
 						},
@@ -838,7 +1079,7 @@ func guiMain(test bool) int {
 	}
 
 	// У системного поля ввода по умолчанию лимит около 30 000 байт (то есть ~15 000 символов Unicode).
-	for _, te := range []*walk.TextEdit{sendText, recvText, logTE} {
+	for _, te := range []*walk.TextEdit{sendText, recvText, logTE, exchText} {
 		te.SetMaxLength(0x7FFFFFFE)
 	}
 
@@ -866,6 +1107,7 @@ func guiMain(test bool) int {
 		})
 		_ = ni.ContextMenu().Actions().Add(show)
 		_ = ni.ContextMenu().Actions().Add(quit)
+		ni.MessageClicked().Attach(restoreFromTray)
 		ni.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
 			if button == walk.LeftButton {
 				restoreFromTray()
@@ -883,10 +1125,19 @@ func guiMain(test bool) int {
 	}
 	refreshMasterUI()
 	widenTooltips(560, 30000)
+	refreshFW()
+	exchStatus("Выключен")
+	if !test {
+		refreshPeers() // сразу заполнить список устройств
+		if st.ExchAuto && st.SaveExchPw && st.ExchPw != "" && !settingsReadOnly {
+			mw.Synchronize(startExchange)
+		}
+	}
 
 	win.DragAcceptFiles(mw.Handle(), true)
 	mw.DropFiles().Attach(func(files []string) { addPaths(files) })
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
+		exch.Stop()
 		if ni != nil {
 			_ = ni.Dispose()
 		}
@@ -924,7 +1175,7 @@ func guiMain(test bool) int {
 				minSizeCheck: func() string {
 					_ = tabs.SetCurrentIndex(0)
 					var problems, sizes []string
-					for i := 0; i < 4; i++ {
+					for i := 0; i < 5; i++ {
 						_ = tabs.SetCurrentIndex(i)
 						_ = mw.SetBounds(walk.Rectangle{X: 20, Y: 20, Width: 900, Height: 800})
 						_ = mw.SetBounds(walk.Rectangle{X: 20, Y: 20, Width: 650, Height: 600})
@@ -939,6 +1190,25 @@ func guiMain(test bool) int {
 					testLogf("MINSIZE per tab at 650x600 request: %s", strings.Join(sizes, ", "))
 					return strings.Join(problems, "; ")
 				},
+				exchSetup: func(pw, name string) {
+					_ = exchPwLE.SetText(pw)
+					_ = exchNameLE.SetText(name)
+				},
+				exchToggle:  toggleExchange,
+				exchRunning: exch.Running,
+				exchHistory: func() (int, string) {
+					if len(histTexts) == 0 {
+						return 0, ""
+					}
+					return len(histTexts), histTexts[0]
+				},
+				trayHide: func() string {
+					if err := hideToTray(); err != nil {
+						return err.Error()
+					}
+					return ""
+				},
+				trayShow: restoreFromTray,
 				trayTest: func() string {
 					if ni == nil {
 						return "skip: нет значка в области уведомлений"
@@ -1100,6 +1370,11 @@ type guiHooks struct {
 	recvText                                            func() string
 	proxyRoundTrip                                      func() string
 	masterUITest, minSizeCheck, trayTest                func() string
+	exchSetup                                           func(pw, name string)
+	exchToggle, trayShow                                func()
+	exchRunning                                         func() bool
+	exchHistory                                         func() (int, string)
+	trayHide                                            func() string
 }
 
 // guiTestSteps выполняется в отдельной горутине; всё, что трогает окно, идёт через ui().
@@ -1259,5 +1534,70 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 		testLogf("GUI RECEIVE text+file: FAIL text=%q", got)
 		testLogf("%s", snd.Log())
 	}
+	// 3) режим обмена через окно: две передачи подряд, вторая - при окне, свёрнутом в трей
+	oldPorts, oldDisc := lanRelayPorts, lanDiscPort
+	lanRelayPorts = []string{"29309", "29310", "29311", "29312", "29313"}
+	lanDiscPort = 29308
+	skipFirewall = true
+	dst3, _ := newWork()
+	exPw := "gui-exchange-pw"
+	ui(func() {
+		h.setOut(dst3)
+		h.exchSetup(exPw, "GuiТест")
+		h.exchToggle()
+	})
+	var running bool
+	ui(func() { running = h.exchRunning() })
+	if !running {
+		fails++
+		testLogf("GUI EXCHANGE: FAIL mode did not start")
+	} else {
+		waitHist := func(n int, sec int) bool {
+			dl := time.Now().Add(time.Duration(sec) * time.Second)
+			for time.Now().Before(dl) {
+				var cnt int
+				ui(func() { cnt, _ = h.exchHistory() })
+				if cnt >= n {
+					return true
+				}
+				time.Sleep(300 * time.Millisecond)
+			}
+			return false
+		}
+		cfg := Settings{Relay: "127.0.0.1:29309", ProxyMode: modeDirect}
+		t1 := "обмен из окна - первое"
+		s1, _ := startSend(cfg, exPw, t1, []string{f1})
+		okA := waitHist(1, 40)
+		if s1 != nil {
+			s1.Wait(20 * time.Second)
+		}
+		var trayMsg string
+		ui(func() { trayMsg = h.trayHide() })
+		t2 := "обмен из окна - второе, окно в трее"
+		s2, _ := startSend(cfg, exPw, t2, nil)
+		okB := waitHist(2, 40)
+		if s2 != nil {
+			s2.Wait(20 * time.Second)
+		}
+		ui(func() { h.trayShow() })
+		var cnt int
+		var top string
+		ui(func() { cnt, top = h.exchHistory() })
+		ui(func() { h.exchToggle() })
+		ui(func() { running = h.exchRunning() })
+		closed := !waitTCP("127.0.0.1:29309", 1500*time.Millisecond, nil)
+		if okA && okB && cnt == 2 && top == t2 && fileEquals(filepath.Join(dst3, "gui файл.bin"), data) && !running && closed {
+			note := ""
+			if trayMsg != "" {
+				note = " (трей недоступен: " + trayMsg + ")"
+			}
+			testLogf("GUI EXCHANGE MODE (2 transfers, one while hidden in tray, stop)%s: OK", note)
+		} else {
+			fails++
+			testLogf("GUI EXCHANGE MODE: FAIL first=%v second=%v history=%d top=%q running=%v portClosed=%v", okA, okB, cnt, top, running, closed)
+		}
+	}
+	lanRelayPorts, lanDiscPort = oldPorts, oldDisc
+	skipFirewall = false
 	return finishTest()
 }

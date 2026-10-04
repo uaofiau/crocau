@@ -92,6 +92,24 @@ jobs:
           Write-Host $out
           $msg = $out -replace "`r?`n", "%0A"
           if ($p.ExitCode -ne 0 -or $out -notmatch "SELFTEST PASSED") { Write-Host "::error title=selftest::exit=$($p.ExitCode) $msg"; exit 1 } else { Write-Host "::notice title=selftest::$msg" }
+      - name: Firewall rules add/remove (path with spaces and Cyrillic)
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          $dir = "$PWD\папка с пробелом"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item "$PWD\crocau.exe" "$dir\crocau.exe"
+          $env:CROCAU_TESTLOG = "$PWD\fwtest.log"
+          $p = Start-Process -FilePath "$dir\crocau.exe" -ArgumentList '--fwtest' -PassThru
+          $done = $p.WaitForExit(90000)
+          if ($done) { $code = $p.ExitCode } else { $code = 99 }
+          Get-Process crocau -ErrorAction SilentlyContinue | Stop-Process -Force
+          $out = ""
+          if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw -Encoding UTF8 }
+          Write-Host $out
+          $msg = $out -replace "`r?`n", "%0A"
+          if ($code -ne 0 -or $out -notmatch ": OK") { Write-Host "::error title=fwtest::exit=$code $msg"; exit 1 } else { Write-Host "::notice title=fwtest::$msg" }
       - name: GUI test (real window, handlers called programmatically)
         shell: powershell
         timeout-minutes: 7

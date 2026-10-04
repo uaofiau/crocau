@@ -113,6 +113,7 @@ type Job struct {
 	work     string
 	secret   string
 	preCount int
+	pre      map[string]bool // имена в папке приёма до начала (для режима обмена)
 }
 
 // JobSpec описывает задание: подготовка (архив) -> croc по очереди relay x маршрутов -> завершение (распаковка).
@@ -531,6 +532,7 @@ func startReceive(s Settings, pw, out string) (*Job, bool, error) {
 	}
 	j := startJob(spec)
 	j.preCount = len(pre)
+	j.pre = pre
 	return j, created, nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -380,6 +381,44 @@ func selfTest() int {
 		}
 	}
 
+	// 7e) путь приёма относительно программы: переносится вместе с папкой программы
+	{
+		tmp, _ := newWork()
+		appA := filepath.Join(tmp, "A", "app")
+		appB := filepath.Join(tmp, "B", "другое место")
+		_ = os.MkdirAll(appA, 0755)
+		_ = os.MkdirAll(appB, 0755)
+		ini := filepath.Join(tmp, "o.ini")
+		oldOverride := exeDirOverride
+		exeDirOverride = appA
+		inside := filepath.Join(appA, "received")
+		outside := filepath.Join(tmp, "A", "общая загрузка")
+		_ = saveSettingsTo(ini, Settings{OutDir: inside, OutRel: true})
+		raw1, _ := os.ReadFile(ini)
+		relStored := strings.Contains(string(raw1), "OutDir=received\r\n") && strings.Contains(string(raw1), "OutDirRelative=1")
+		_ = saveSettingsTo(ini, Settings{OutDir: outside, OutRel: true})
+		upStored := loadSettingsFrom(ini).OutDir == filepath.Join("..", "общая загрузка")
+		_ = saveSettingsTo(ini, Settings{OutDir: inside, OutRel: false})
+		absStored := loadSettingsFrom(ini).OutDir == inside && !loadSettingsFrom(ini).OutRel
+		_ = saveSettingsTo(ini, Settings{OutDir: inside, OutRel: true})
+		// "перенос": тот же файл настроек, но программа лежит в другом месте
+		exeDirOverride = appB
+		moved := resolveOutDir(loadSettingsFrom(ini).OutDir) == filepath.Join(appB, "received")
+		exeDirOverride = appA
+		_ = saveSettingsTo(ini, Settings{OutDir: outside, OutRel: true})
+		exeDirOverride = appB
+		movedUp := resolveOutDir(loadSettingsFrom(ini).OutDir) == filepath.Join(tmp, "B", "общая загрузка")
+		exeDirOverride = appA
+		emptyOK := resolveOutDir("") == filepath.Join(appA, "received") && resolveOutDir("sub") == filepath.Join(appA, "sub")
+		exeDirOverride = oldOverride
+		if relStored && upStored && absStored && moved && movedUp && emptyOK {
+			testLogf("PORTABLE RECEIVE FOLDER (relative to program, follows the program, absolute when unticked): OK")
+		} else {
+			fails++
+			testLogf("PORTABLE RECEIVE FOLDER: FAIL stored=%v up=%v abs=%v moved=%v movedUp=%v empty=%v", relStored, upStored, absStored, moved, movedUp, emptyOK)
+		}
+	}
+
 	// 7c) мастер-пароль: шифрование, блокировка, неверный пароль, переносимость, смена, отключение, режим "только чтение"
 	{
 		tmp, _ := newWork()
@@ -478,6 +517,121 @@ func selfTest() int {
 			fails++
 			testLogf("SMART COMPRESSION HINT: FAIL")
 		}
+	}
+
+	// 9) локальная сеть: поиск устройств, передача через сетевой адрес, режим непрерывного обмена
+	{
+		oldPorts, oldDisc := lanRelayPorts, lanDiscPort
+		lanRelayPorts = []string{"29109", "29110", "29111", "29112", "29113"}
+		lanDiscPort = 29108
+		skipFirewall = true
+
+		// 9a) поиск устройств (ответчик + запрос), расчёт широковещательных адресов, разбор адреса
+		stopResp, rerr := startResponder("peer-1", "Тестовый ПК", 29109)
+		peers := discoverPeers(1200*time.Millisecond, "me-1", []string{"127.0.0.1:29108"})
+		own := discoverPeers(800*time.Millisecond, "peer-1", []string{"127.0.0.1:29108"})
+		if stopResp != nil {
+			stopResp()
+		}
+		discOK := rerr == nil && len(peers) == 1 && peers[0].Name == "Тестовый ПК" && peers[0].Port == 29109 &&
+			peers[0].IP == "127.0.0.1" && len(own) == 0
+		bc1, bc2 := bcastOf(net.ParseIP("192.168.1.37"), net.CIDRMask(24, 32)), bcastOf(net.ParseIP("10.1.2.3"), net.CIDRMask(20, 32))
+		bcOK := bc1 != nil && bc1.String() == "192.168.1.255" && bc2 != nil && bc2.String() == "10.1.15.255"
+		a1, ok1 := parseLANAddr("Мой ПК (192.168.1.5)")
+		a2, ok2 := parseLANAddr("10.0.0.2:3000")
+		_, ok3 := parseLANAddr("не адрес")
+		_, ok4 := parseLANAddr("300.1.1.1")
+		parseOK := ok1 && a1 == "192.168.1.5:29109" && ok2 && a2 == "10.0.0.2:3000" && !ok3 && !ok4
+		if discOK && bcOK && parseOK {
+			testLogf("LAN DISCOVERY (responder, query, self-filter, broadcast calc, address parse): OK")
+		} else {
+			fails++
+			testLogf("LAN DISCOVERY: FAIL disc=%v(%d peers) bcast=%v parse=%v err=%v", discOK, len(peers), bcOK, parseOK, rerr)
+		}
+
+		// 9b) передача через сетевой (не loopback) адрес этого компьютера
+		lsrc, _ := newWork()
+		lf := filepath.Join(lsrc, "lan файл.bin")
+		ldata := randBytes(500000)
+		_ = os.WriteFile(lf, ldata, 0644)
+		if ips := localIPv4s(); len(ips) == 0 {
+			testLogf("LAN TRANSFER via network address: пропущено (нет сетевых адресов)")
+		} else {
+			lwork, _ := newWork()
+			lrelay := startJob(JobSpec{Work: lwork, MkArgs: func(string) []string {
+				return []string{"relay", "--port", "29109", "--ports", "29109,29110,29111,29112,29113"}
+			}})
+			up := waitTCP(ips[0]+":29109", 5*time.Second, lrelay)
+			lan := Settings{Relay: ips[0] + ":29109", ProxyMode: modeDirect}
+			ldst, _ := newWork()
+			ok, res, snd, rcv := transfer(lan, "lan-pass-123", "lan-pass-123", "по локальной сети", []string{lf}, ldst, 60*time.Second)
+			lrelay.Kill()
+			lrelay.Wait(3 * time.Second)
+			if up && ok && res.Text == "по локальной сети" && fileEquals(filepath.Join(ldst, "lan файл.bin"), ldata) {
+				testLogf("LAN TRANSFER via network address %s: OK", ips[0])
+			} else {
+				fails++
+				testLogf("LAN TRANSFER via %s: FAIL (relay up=%v text=%q)", ips[0], up, res.Text)
+				dumpLogs(snd, rcv)
+			}
+		}
+
+		// 9c) режим непрерывного обмена: две передачи подряд, поиск устройства, короткий пароль, остановка
+		events := make(chan ExchangeEvent, 32)
+		var x Exchange
+		dstX, _ := newWork()
+		xerr := x.Start("exchange-pw-1", dstX, "ТестОбмен", func(ev ExchangeEvent) { events <- ev })
+		waitEv := func(kind string, d time.Duration) (ExchangeEvent, bool) {
+			end := time.After(d)
+			for {
+				select {
+				case ev := <-events:
+					if ev.Kind == kind {
+						return ev, true
+					}
+				case <-end:
+					return ExchangeEvent{}, false
+				}
+			}
+		}
+		if xerr != nil {
+			fails++
+			testLogf("EXCHANGE start: FAIL %v", xerr)
+		} else {
+			cfg := Settings{Relay: "127.0.0.1:29109", ProxyMode: modeDirect}
+			s1, _ := startSend(cfg, "exchange-pw-1", "первое сообщение", []string{lf})
+			ev1, got1 := waitEv("received", 40*time.Second)
+			if s1 != nil {
+				s1.Wait(20 * time.Second)
+			}
+			s2, _ := startSend(cfg, "exchange-pw-1", "второе сообщение", nil)
+			ev2, got2 := waitEv("received", 40*time.Second)
+			if s2 != nil {
+				s2.Wait(20 * time.Second)
+			}
+			// чужой пароль не должен ничего доставить
+			s3, _ := startSend(cfg, "wrong-password-xx", "чужое", nil)
+			_, got3 := waitEv("received", 6*time.Second)
+			if s3 != nil {
+				s3.Kill()
+			}
+			found := discoverPeers(1200*time.Millisecond, "me-2", []string{"127.0.0.1:29108"})
+			shortErr := (&Exchange{}).Start("short", dstX, "x", func(ExchangeEvent) {})
+			x.Stop()
+			closed := !waitTCP("127.0.0.1:29109", 1500*time.Millisecond, nil)
+			exchOK := got1 && ev1.Text == "первое сообщение" && len(ev1.Names) == 1 && ev1.Names[0] == "lan файл.bin" &&
+				fileEquals(filepath.Join(dstX, "lan файл.bin"), ldata) &&
+				got2 && ev2.Text == "второе сообщение" && len(ev2.Names) == 0 && !got3 &&
+				len(found) == 1 && found[0].Name == "ТестОбмен" && shortErr != nil && closed && !x.Running()
+			if exchOK {
+				testLogf("EXCHANGE MODE (2 transfers in a row, wrong password ignored, discovery, short pw rejected, stop): OK")
+			} else {
+				fails++
+				testLogf("EXCHANGE MODE: FAIL got1=%v got2=%v wrongDelivered=%v found=%d shortErr=%v closed=%v", got1, got2, got3, len(found), shortErr, closed)
+			}
+		}
+		lanRelayPorts, lanDiscPort = oldPorts, oldDisc
+		skipFirewall = false
 	}
 
 	// 8) прокси: SOCKS5 (логин), SOCKS4, HTTP (логин), авто-режим, неверный пароль, проверка доступности
