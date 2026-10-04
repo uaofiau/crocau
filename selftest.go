@@ -616,7 +616,7 @@ func selfTest() int {
 				s3.Kill()
 			}
 			found := discoverPeers(1200*time.Millisecond, "me-2", []string{"127.0.0.1:29108"})
-			shortErr := (&Exchange{}).Start("short", dstX, "x", func(ExchangeEvent) {})
+			shortErr := (&Exchange{}).Start("ab", dstX, "x", func(ExchangeEvent) {})
 			x.Stop()
 			closed := !waitTCP("127.0.0.1:29109", 1500*time.Millisecond, nil)
 			exchOK := got1 && ev1.Text == "первое сообщение" && len(ev1.Names) == 1 && ev1.Names[0] == "lan файл.bin" &&
