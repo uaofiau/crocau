@@ -22,13 +22,16 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: false
 
-      - name: Resolve modules
+      - name: Resolve modules (croc v10.0.12 + crocau patch)
         shell: bash
         run: |
           set +e
           {
-            go version
-            go get github.com/lxn/walk@latest github.com/lxn/win@latest github.com/schollz/croc/v10@${CROC_VERSION}
+            go version &&
+            git clone --depth 1 --branch "${CROC_VERSION}" https://github.com/schollz/croc.git croc-patched &&
+            git -C croc-patched apply "$GITHUB_WORKSPACE/patches/croc-v10.0.12-sendfile-race.patch" &&
+            go mod edit -replace "github.com/schollz/croc/v10=./croc-patched" &&
+            go get github.com/lxn/walk@latest github.com/lxn/win@latest github.com/schollz/croc/v10@${CROC_VERSION} &&
             go mod tidy
           } > mod.log 2>&1
           rc=$?

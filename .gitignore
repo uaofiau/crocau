@@ -7,3 +7,4 @@ received/
 mod.log
 build.log
 go.sum
+croc-patched/

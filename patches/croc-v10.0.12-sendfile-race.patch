@@ -1,0 +1,58 @@
+diff --git a/src/croc/croc.go b/src/croc/croc.go
+index b5e0ed28..88ec8ba3 100644
+--- a/src/croc/croc.go
++++ b/src/croc/croc.go
+@@ -17,6 +17,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"golang.org/x/term"
+@@ -1915,9 +1916,12 @@ func (c *Client) updateState() (err error) {
+ 		if err != nil {
+ 			return
+ 		}
++		// crocau: у каждого файла своё состояние отправки (раньше счётчик был общим и обнулялся при старте
++		// следующего файла, поэтому запоздавшие потоки предыдущего файла преждевременно закрывали новый).
++		st := &sendFileState{f: c.fread, left: int32(len(c.Options.RelayPorts))}
+ 		for i := 0; i < len(c.Options.RelayPorts); i++ {
+ 			log.Debugf("starting sending over comm %d", i)
+-			go c.sendData(i)
++			go c.sendData(i, st)
+ 		}
+ 	}
+ 	return
+@@ -2024,13 +2028,18 @@ func (c *Client) receiveData(i int) {
+ 	}
+ }
+ 
+-func (c *Client) sendData(i int) {
++// sendFileState - состояние отправки одного файла (crocau: исправление гонки между файлами).
++type sendFileState struct {
++	f    *os.File
++	left int32
++}
++
++func (c *Client) sendData(i int, st *sendFileState) {
+ 	defer func() {
+ 		log.Debugf("finished with %d", i)
+-		c.numfinished++
+-		if c.numfinished == len(c.Options.RelayPorts) {
++		if atomic.AddInt32(&st.left, -1) == 0 {
+ 			log.Debug("closing file")
+-			if err := c.fread.Close(); err != nil {
++			if err := st.f.Close(); err != nil {
+ 				log.Errorf("error closing file: %v", err)
+ 			}
+ 		}
+@@ -2045,7 +2054,7 @@ func (c *Client) sendData(i int) {
+ 		var errRead error
+ 		if math.Mod(curi, float64(len(c.Options.RelayPorts))) == float64(i) {
+ 			data := make([]byte, models.TCP_BUFFER_SIZE/2)
+-			n, errRead = c.fread.ReadAt(data, readingPos)
++			n, errRead = st.f.ReadAt(data, readingPos)
+ 			if c.limiter != nil {
+ 				r := c.limiter.ReserveN(time.Now(), n)
+ 				log.Debugf("Limiting Upload for %d", r.Delay())

@@ -68,7 +68,10 @@ func promptPassword(owner walk.Form, title, message string, confirm bool, okText
 	return result, accepted
 }
 
-const destInternet = "Через интернет"
+const (
+	destInternet = "Через интернет"
+	destWait     = "Ждать получателя в сети"
+)
 
 var proxyTypeNames = []string{"socks5", "socks4", "http"}
 
@@ -151,6 +154,7 @@ func guiMain(test bool) int {
 		masterOffBtn    *walk.PushButton
 		ni              *walk.NotifyIcon
 		destCB          *walk.ComboBox
+		srcCB           *walk.ComboBox
 		outRelCB        *walk.CheckBox
 		exchNameLE      *walk.LineEdit
 		exchPwLE        *walk.LineEdit
@@ -169,6 +173,7 @@ func guiMain(test bool) int {
 	checking := false
 	var exch Exchange
 	var peers []Peer
+	var curHost *HostSession
 	var history, histTexts []string
 	curLAN := false
 	hostName, _ := os.Hostname()
@@ -401,8 +406,18 @@ func guiMain(test bool) int {
 			}
 		}
 		if code != 0 && curLAN && strings.Contains(job.Log(), "could not connect") {
-			tail += "\r\nУстройство не отвечает. На нём должен быть включён режим обмена (вкладка «Обмен»), " +
-				"а брандмауэр должен пропускать порты (кнопка «Открыть порты» на том устройстве)."
+			if curMode == "recv" {
+				tail += "\r\nОтправитель не отвечает. На его устройстве на вкладке «Отправить» выберите «Ждать получателя в сети» " +
+					"и нажмите «Отправить»; проверьте брандмауэр (кнопка «Открыть порты» на вкладке «Обмен» там же)."
+			} else {
+				tail += "\r\nУстройство не отвечает. На нём должен быть включён режим обмена (вкладка «Обмен»), " +
+					"а брандмауэр должен пропускать порты (кнопка «Открыть порты» на том устройстве)."
+			}
+		}
+		if curHost != nil {
+			h := curHost
+			curHost = nil
+			go h.Close()
 		}
 		if code != 0 && strings.Contains(job.Log(), "лимит подключений") {
 			tail += "\r\nПубличные relay ограничили подключения с вашего IP (лимит около 30 в минуту на IP; " +
@@ -441,6 +456,25 @@ func guiMain(test bool) int {
 		cur := collect()
 		saveNow(cur)
 		target := strings.TrimSpace(destCB.Text())
+		if target == destWait {
+			if exch.Running() {
+				warn(errBusyRole.Error())
+				return
+			}
+			name := strings.TrimSpace(exchNameLE.Text())
+			if name == "" {
+				name = hostName
+			}
+			j, host, note, err := startHostedSend(cur, pw, text, items, name)
+			if err != nil {
+				warn(err.Error())
+				return
+			}
+			curHost, curLAN = host, false
+			setLog("Ожидание получателя в локальной сети...\r\n" + note)
+			begin(j, "send", "", false)
+			return
+		}
 		lan := target != "" && !strings.HasPrefix(target, destInternet)
 		lanAddr := ""
 		if lan {
@@ -493,13 +527,38 @@ func guiMain(test bool) int {
 		cur.OutDir = out
 		saveNow(cur)
 		_ = recvText.SetText("")
+		source := strings.TrimSpace(srcCB.Text())
+		lan := source != "" && !strings.HasPrefix(source, destInternet)
+		lanAddr := ""
+		if lan {
+			a, ok := "", false
+			for _, p := range peers {
+				if p.Label() == source {
+					a, ok = p.Addr(), true
+					break
+				}
+			}
+			if !ok {
+				a, ok = parseLANAddr(source)
+			}
+			if !ok {
+				warn("Укажите IP-адрес отправителя (например 192.168.1.5), выберите его из списка или выберите «Через интернет».")
+				return
+			}
+			lanAddr = a
+			cur.Relay, cur.RelayPass, cur.ProxyMode, cur.Proxies = a, "", modeDirect, nil
+		}
 		j, created, err := startReceive(cur, pw, out)
 		if err != nil {
 			warn(err.Error())
 			return
 		}
-		curLAN = false
-		setLog("Ожидание отправителя...")
+		curLAN = lan
+		if lan {
+			setLog("Подключение к отправителю " + lanAddr + "...\r\nПароль должен совпадать с паролем отправителя.")
+		} else {
+			setLog("Ожидание отправителя...")
+		}
 		begin(j, "recv", out, created)
 	}
 
@@ -535,19 +594,29 @@ func guiMain(test bool) int {
 	// ---------- локальная сеть и режим обмена ----------
 	refreshPeers := func() {
 		go func() {
-			found := discoverPeers(1500*time.Millisecond, instanceID, broadcastTargets())
+			found := discoverPeers(1500*time.Millisecond, instanceID, "", broadcastTargets())
 			mw.Synchronize(func() {
 				peers = found
-				cur := destCB.Text()
-				items := []string{destInternet}
+				destItems := []string{destInternet, destWait}
+				srcItems := []string{destInternet}
 				for _, p := range found {
-					items = append(items, p.Label())
+					if p.Role == roleRecv {
+						destItems = append(destItems, p.Label())
+					} else if p.Role == roleSend {
+						srcItems = append(srcItems, p.Label())
+					}
 				}
-				_ = destCB.SetModel(items)
-				if cur != "" {
-					_ = destCB.SetText(cur)
-				} else {
-					_ = destCB.SetCurrentIndex(0)
+				for _, c := range []struct {
+					cb    *walk.ComboBox
+					items []string
+				}{{destCB, destItems}, {srcCB, srcItems}} {
+					cur := c.cb.Text()
+					_ = c.cb.SetModel(c.items)
+					if cur != "" {
+						_ = c.cb.SetText(cur)
+					} else {
+						_ = c.cb.SetCurrentIndex(0)
+					}
 				}
 			})
 		}()
@@ -866,7 +935,7 @@ func guiMain(test bool) int {
 								Children: []Widget{
 									Label{Text: "Куда:"},
 									ComboBox{AssignTo: &destCB, Editable: true, Model: []string{destInternet}, CurrentIndex: 0, MinSize: Size{Width: 180},
-										ToolTipText: "«Через интернет» - публичные relay. Или устройство из вашей сети (оно должно быть в режиме обмена): выберите из списка или впишите IP, например 192.168.1.5"},
+										ToolTipText: "«Через интернет» - публичные relay.\r\n«Ждать получателя в сети» - это устройство открывает порт и ждёт, получатель находит его на вкладке «Получить» или вводит ваш IP.\r\nУстройство из списка - получатель в режиме обмена (вкладка «Обмен»). Можно вписать IP вручную, например 192.168.1.5."},
 									PushButton{Text: "Найти в сети", OnClicked: refreshPeers},
 									HSpacer{},
 								},
@@ -889,6 +958,16 @@ func guiMain(test bool) int {
 						Title:  "Получить",
 						Layout: VBox{},
 						Children: []Widget{
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									Label{Text: "Откуда:"},
+									ComboBox{AssignTo: &srcCB, Editable: true, Model: []string{destInternet}, CurrentIndex: 0, MinSize: Size{Width: 180},
+										ToolTipText: "«Через интернет» - публичные relay.\r\nИли отправитель в вашей сети (он выбрал «Ждать получателя в сети»): найдите его кнопкой «Найти в сети» или впишите его IP, например 192.168.1.5."},
+									PushButton{Text: "Найти в сети", OnClicked: refreshPeers},
+									HSpacer{},
+								},
+							},
 							Label{Text: "Пароль (тот, что задал отправитель):"},
 							Composite{
 								Layout: HBox{MarginsZero: true},
@@ -1138,6 +1217,9 @@ func guiMain(test bool) int {
 	mw.DropFiles().Attach(func(files []string) { addPaths(files) })
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
 		exch.Stop()
+		if curHost != nil {
+			curHost.Close()
+		}
 		if ni != nil {
 			_ = ni.Dispose()
 		}
@@ -1190,6 +1272,8 @@ func guiMain(test bool) int {
 					testLogf("MINSIZE per tab at 650x600 request: %s", strings.Join(sizes, ", "))
 					return strings.Join(problems, "; ")
 				},
+				setDest: func(t string) { _ = destCB.SetText(t) },
+				setSrc:  func(t string) { _ = srcCB.SetText(t) },
 				exchSetup: func(pw, name string) {
 					_ = exchPwLE.SetText(pw)
 					_ = exchNameLE.SetText(name)
@@ -1371,6 +1455,7 @@ type guiHooks struct {
 	proxyRoundTrip                                      func() string
 	masterUITest, minSizeCheck, trayTest                func() string
 	exchSetup                                           func(pw, name string)
+	setDest, setSrc                                     func(string)
 	exchToggle, trayShow                                func()
 	exchRunning                                         func() bool
 	exchHistory                                         func() (int, string)
@@ -1597,6 +1682,68 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 			testLogf("GUI EXCHANGE MODE: FAIL first=%v second=%v history=%d top=%q running=%v portClosed=%v", okA, okB, cnt, top, running, closed)
 		}
 	}
+	// 4) отправитель в окне "ждёт получателя в сети": получатель находит его и забирает данные
+	{
+		textH := "из окна: жду получателя"
+		ui(func() {
+			h.setDest(destWait)
+			h.setSendText(textH)
+			h.addFiles([]string{f1})
+			h.setSendPw("host-gui-pw")
+			h.setCompress(false)
+			h.send()
+		})
+		time.Sleep(2 * time.Second)
+		found := discoverPeers(1200*time.Millisecond, "gui-recv", roleSend, []string{"127.0.0.1:29308"})
+		dstH, _ := newWork()
+		rcv, created, rerr := startReceive(Settings{Relay: "127.0.0.1:29309", ProxyMode: modeDirect}, "host-gui-pw", dstH)
+		okR := false
+		var res RecvResult
+		if rerr == nil {
+			okR = rcv.Wait(60 * time.Second)
+			res = finalizeReceive(rcv, dstH, created)
+		}
+		idle := waitIdle(30)
+		closed := !waitTCP("127.0.0.1:29309", 5*time.Second, nil)
+		if okR && res.Text == textH && fileEquals(filepath.Join(dstH, "gui файл.bin"), data) && len(found) == 1 && found[0].Role == roleSend && idle && closed {
+			testLogf("GUI SENDER WAITS FOR RECEIVER (announced, pulled, port closed after): OK")
+		} else {
+			fails++
+			testLogf("GUI SENDER WAITS: FAIL ok=%v text=%q found=%d idle=%v portClosed=%v", okR, res.Text, len(found), idle, closed)
+		}
+	}
+
+	// 5) получатель в окне вводит адрес ожидающего отправителя вручную
+	{
+		textP := "забираю по адресу вручную"
+		hj, host, _, herr := startHostedSend(Settings{}, "pull-gui-pw", textP, []string{f1}, "ВнешнийХост")
+		if herr != nil {
+			fails++
+			testLogf("GUI RECEIVE FROM ADDRESS: FAIL host start %v", herr)
+		} else {
+			time.Sleep(1500 * time.Millisecond)
+			base, _ := newWork()
+			dstP := filepath.Join(base, "pull")
+			ui(func() {
+				h.setSrc("127.0.0.1:29309")
+				h.setRecvPw("pull-gui-pw")
+				h.setOut(dstP)
+				h.recv()
+			})
+			idle := waitIdle(60)
+			hj.Wait(20 * time.Second)
+			host.Close()
+			var got string
+			ui(func() { got = h.recvText() })
+			if idle && got == textP && fileEquals(filepath.Join(dstP, "gui файл.bin"), data) {
+				testLogf("GUI RECEIVE FROM SENDER BY MANUAL ADDRESS: OK")
+			} else {
+				fails++
+				testLogf("GUI RECEIVE BY ADDRESS: FAIL idle=%v text=%q", idle, got)
+			}
+		}
+	}
+
 	lanRelayPorts, lanDiscPort = oldPorts, oldDisc
 	skipFirewall = false
 	return finishTest()

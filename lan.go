@@ -24,11 +24,21 @@ const (
 	discReply = "CROCAU1!"
 )
 
-// Peer - устройство в локальной сети, на котором включён режим обмена.
+// Роли устройства в сети:
+//
+//	roleRecv - принимает (режим обмена): отправитель находит его и присылает данные;
+//	roleSend - ждёт получателя (отправитель держит у себя порт): получатель находит его и забирает данные.
+const (
+	roleRecv = "recv"
+	roleSend = "send"
+)
+
+// Peer - устройство в локальной сети с включённым режимом обмена или ожидающий отправитель.
 type Peer struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Port int    `json:"port"`
+	Role string `json:"role"`
 	IP   string `json:"-"`
 }
 
@@ -42,13 +52,14 @@ func (p Peer) Label() string {
 	return l + ")"
 }
 
-// startResponder отвечает на поисковые запросы по UDP. Возвращает функцию остановки.
-func startResponder(id, name string, relayPort int) (func(), error) {
+// startResponder отвечает на поисковые запросы по UDP от имени устройства в роли role.
+// Возвращает функцию остановки. Один UDP-порт: одновременно возможна только одна роль на компьютере.
+func startResponder(id, role, name string, relayPort int) (func(), error) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: lanDiscPort})
 	if err != nil {
 		return nil, err
 	}
-	reply, _ := json.Marshal(Peer{ID: id, Name: name, Port: relayPort})
+	reply, _ := json.Marshal(Peer{ID: id, Name: name, Port: relayPort, Role: role})
 	go func() {
 		buf := make([]byte, 512)
 		for {
@@ -60,8 +71,16 @@ func startResponder(id, name string, relayPort int) (func(), error) {
 			if !strings.HasPrefix(msg, discQuery) {
 				continue
 			}
-			if strings.TrimSpace(strings.TrimPrefix(msg, discQuery)) == id {
+			// запрос: CROCAU1?<id спрашивающего>|<нужная роль или пусто>
+			asker, want := strings.TrimPrefix(msg, discQuery), ""
+			if i := strings.Index(asker, "|"); i >= 0 {
+				asker, want = asker[:i], asker[i+1:]
+			}
+			if strings.TrimSpace(asker) == id {
 				continue // собственный запрос
+			}
+			if w := strings.TrimSpace(want); w != "" && w != role {
+				continue // ищут другую роль
 			}
 			_, _ = conn.WriteToUDP(append([]byte(discReply), reply...), addr)
 		}
@@ -70,13 +89,14 @@ func startResponder(id, name string, relayPort int) (func(), error) {
 }
 
 // discoverPeers рассылает запрос по targets (host:port) и собирает ответы в течение wait.
-func discoverPeers(wait time.Duration, selfID string, targets []string) []Peer {
+// wantRole: roleRecv, roleSend или пусто (любая роль).
+func discoverPeers(wait time.Duration, selfID, wantRole string, targets []string) []Peer {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{})
 	if err != nil {
 		return nil
 	}
 	defer conn.Close()
-	query := []byte(discQuery + selfID)
+	query := []byte(discQuery + selfID + "|" + wantRole)
 	seen := map[string]bool{}
 	var out []Peer
 	buf := make([]byte, 1024)
@@ -100,7 +120,7 @@ func discoverPeers(wait time.Duration, selfID string, targets []string) []Peer {
 			if json.Unmarshal(msg[len(discReply):], &p) != nil || p.Port <= 0 || p.Port > 65535 {
 				continue
 			}
-			if p.ID == selfID {
+			if p.ID == selfID || (wantRole != "" && p.Role != wantRole) {
 				continue
 			}
 			p.IP = addr.IP.String()

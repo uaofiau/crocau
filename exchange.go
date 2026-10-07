@@ -121,7 +121,7 @@ func (x *Exchange) Start(pw, out, name string, onEvent func(ExchangeEvent)) erro
 
 	id := instanceID
 	var warn []string
-	if stop, err := startResponder(id, name, mustAtoi(port)); err != nil {
+	if stop, err := startResponder(id, roleRecv, name, mustAtoi(port)); err != nil {
 		warn = append(warn, "поиск устройств недоступен (UDP-порт занят)")
 	} else {
 		x.mu.Lock()

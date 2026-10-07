@@ -527,14 +527,16 @@ func selfTest() int {
 		skipFirewall = true
 
 		// 9a) поиск устройств (ответчик + запрос), расчёт широковещательных адресов, разбор адреса
-		stopResp, rerr := startResponder("peer-1", "Тестовый ПК", 29109)
-		peers := discoverPeers(1200*time.Millisecond, "me-1", []string{"127.0.0.1:29108"})
-		own := discoverPeers(800*time.Millisecond, "peer-1", []string{"127.0.0.1:29108"})
+		stopResp, rerr := startResponder("peer-1", roleRecv, "Тестовый ПК", 29109)
+		peers := discoverPeers(1200*time.Millisecond, "me-1", roleRecv, []string{"127.0.0.1:29108"})
+		wrongRole := discoverPeers(800*time.Millisecond, "me-1", roleSend, []string{"127.0.0.1:29108"})
+		anyRole := discoverPeers(800*time.Millisecond, "me-1", "", []string{"127.0.0.1:29108"})
+		own := discoverPeers(800*time.Millisecond, "peer-1", roleRecv, []string{"127.0.0.1:29108"})
 		if stopResp != nil {
 			stopResp()
 		}
 		discOK := rerr == nil && len(peers) == 1 && peers[0].Name == "Тестовый ПК" && peers[0].Port == 29109 &&
-			peers[0].IP == "127.0.0.1" && len(own) == 0
+			peers[0].IP == "127.0.0.1" && peers[0].Role == roleRecv && len(own) == 0 && len(wrongRole) == 0 && len(anyRole) == 1
 		bc1, bc2 := bcastOf(net.ParseIP("192.168.1.37"), net.CIDRMask(24, 32)), bcastOf(net.ParseIP("10.1.2.3"), net.CIDRMask(20, 32))
 		bcOK := bc1 != nil && bc1.String() == "192.168.1.255" && bc2 != nil && bc2.String() == "10.1.15.255"
 		a1, ok1 := parseLANAddr("Мой ПК (192.168.1.5)")
@@ -573,6 +575,44 @@ func selfTest() int {
 				fails++
 				testLogf("LAN TRANSFER via %s: FAIL (relay up=%v text=%q)", ips[0], up, res.Text)
 				dumpLogs(snd, rcv)
+			}
+		}
+
+		// 9b2) много мелких файлов подряд и один побольше, несколько раз (регрессия: гонка в croc между файлами)
+		{
+			many, _ := newWork()
+			mdir := filepath.Join(many, "мелочь")
+			_ = os.MkdirAll(mdir, 0755)
+			for i := 0; i < 60; i++ {
+				_ = os.WriteFile(filepath.Join(mdir, fmt.Sprintf("f%02d.txt", i)), []byte(fmt.Sprintf("файл %d", i)), 0644)
+			}
+			bigM := randBytes(1 << 20)
+			_ = os.WriteFile(filepath.Join(mdir, "zzz-big.bin"), bigM, 0644)
+			mwork, _ := newWork()
+			mrelay := startJob(JobSpec{Work: mwork, MkArgs: func(string) []string {
+				return []string{"relay", "--port", "29109", "--ports", "29109,29110,29111,29112,29113"}
+			}})
+			mup := waitTCP("127.0.0.1:29109", 5*time.Second, mrelay)
+			good := 0
+			var lastS, lastR *Job
+			for round := 0; round < 3; round++ {
+				mdst, _ := newWork()
+				ok, res, snd, rcv := transfer(Settings{Relay: "127.0.0.1:29109", ProxyMode: modeDirect}, "many-pw", "many-pw",
+					"текст вместе с мелочью", []string{mdir}, mdst, 90*time.Second)
+				entries, _ := os.ReadDir(filepath.Join(mdst, "мелочь"))
+				if ok && res.Text == "текст вместе с мелочью" && len(entries) == 61 && fileEquals(filepath.Join(mdst, "мелочь", "zzz-big.bin"), bigM) {
+					good++
+				}
+				lastS, lastR = snd, rcv
+			}
+			mrelay.Kill()
+			mrelay.Wait(3 * time.Second)
+			if mup && good == 3 {
+				testLogf("MANY SMALL FILES + BIG FILE x3 (croc file-switch race fixed): OK")
+			} else {
+				fails++
+				testLogf("MANY SMALL FILES: FAIL good=%d/3 relayUp=%v", good, mup)
+				dumpLogs(lastS, lastR)
 			}
 		}
 
@@ -615,7 +655,7 @@ func selfTest() int {
 			if s3 != nil {
 				s3.Kill()
 			}
-			found := discoverPeers(1200*time.Millisecond, "me-2", []string{"127.0.0.1:29108"})
+			found := discoverPeers(1200*time.Millisecond, "me-2", roleRecv, []string{"127.0.0.1:29108"})
 			shortErr := (&Exchange{}).Start("ab", dstX, "x", func(ExchangeEvent) {})
 			x.Stop()
 			closed := !waitTCP("127.0.0.1:29109", 1500*time.Millisecond, nil)
@@ -630,6 +670,44 @@ func selfTest() int {
 				testLogf("EXCHANGE MODE: FAIL got1=%v got2=%v wrongDelivered=%v found=%d shortErr=%v closed=%v", got1, got2, got3, len(found), shortErr, closed)
 			}
 		}
+		// 9d) отправитель ждёт получателя: объявляется, получатель находит его и забирает данные
+		{
+			recvAddr := "127.0.0.1:29109"
+			if ips := localIPv4s(); len(ips) > 0 {
+				recvAddr = ips[0] + ":29109" // получатель идёт по сетевому адресу отправителя
+			}
+			hjob, host, note, herr := startHostedSend(Settings{}, "host-pw", "из режима ожидания", []string{lf}, "ХостТест")
+			if herr != nil {
+				fails++
+				testLogf("HOSTED SEND: FAIL start %v", herr)
+			} else {
+				senders := discoverPeers(1200*time.Millisecond, "me-3", roleSend, []string{"127.0.0.1:29108"})
+				asRecv := discoverPeers(800*time.Millisecond, "me-3", roleRecv, []string{"127.0.0.1:29108"})
+				hdst, _ := newWork()
+				time.Sleep(1500 * time.Millisecond)
+				rcv, created, rerr := startReceive(Settings{Relay: recvAddr, ProxyMode: modeDirect}, "host-pw", hdst)
+				okR := false
+				var res RecvResult
+				if rerr == nil {
+					okR = rcv.Wait(60 * time.Second)
+					res = finalizeReceive(rcv, hdst, created)
+				}
+				hjob.Wait(30 * time.Second)
+				host.Close()
+				gone := !waitTCP("127.0.0.1:29109", 1500*time.Millisecond, nil)
+				after := discoverPeers(800*time.Millisecond, "me-3", roleSend, []string{"127.0.0.1:29108"})
+				if okR && rcv.ExitCode() == 0 && res.Text == "из режима ожидания" && fileEquals(filepath.Join(hdst, "lan файл.bin"), ldata) &&
+					len(senders) == 1 && senders[0].Name == "ХостТест" && senders[0].Role == roleSend && len(asRecv) == 0 && gone && len(after) == 0 &&
+					strings.Contains(note, "Ждём получателя") {
+					testLogf("HOSTED SEND (sender waits, announced as 'send', receiver pulls via %s, cleaned up): OK", recvAddr)
+				} else {
+					fails++
+					testLogf("HOSTED SEND: FAIL ok=%v text=%q senders=%d asRecv=%d portClosed=%v after=%d", okR, res.Text, len(senders), len(asRecv), gone, len(after))
+					dumpLogs(hjob, rcv)
+				}
+			}
+		}
+
 		lanRelayPorts, lanDiscPort = oldPorts, oldDisc
 		skipFirewall = false
 	}
