@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	mrand "math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -288,6 +289,13 @@ func (j *Job) run(spec JobSpec) int {
 		}
 		var errText string
 		code, errText = j.attempt(spec, a)
+		// Сбой обмена ключами бывает, когда отправитель и приёмник встретились в момент перезапуска
+		// второй стороны (комната ещё занята прежним сеансом): короткая пауза и повтор.
+		for try := 0; try < 3 && code != 0 && !j.isKilled() && isHandshakeError(errText); try++ {
+			j.addNote("Не удалось установить защищённый канал, повторяю...")
+			time.Sleep(time.Duration(1500+mrand.Intn(1500)) * time.Millisecond)
+			code, errText = j.attempt(spec, a)
+		}
 		if code == 0 {
 			break
 		}
@@ -578,4 +586,8 @@ func finalizeReceive(j *Job, out string, created bool) RecvResult {
 		_ = os.Remove(out)
 	}
 	return r
+}
+
+func isHandshakeError(s string) bool {
+	return strings.Contains(s, "could not secure channel") || strings.Contains(s, "secure channel) not ready")
 }

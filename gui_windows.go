@@ -1458,20 +1458,20 @@ func longTestText(head string) string {
 }
 
 type guiHooks struct {
-	iconErr                                             error
+	iconErr                                                         error
 	setRelay, setSendText, setSendPw, setRecvPw, setOut, setExchDir func(string)
-	addFiles                                            func([]string)
-	setCompress                                         func(bool)
-	send, recv                                          func()
-	recvText                                            func() string
-	proxyRoundTrip                                      func() string
-	masterUITest, minSizeCheck, trayTest                func() string
-	exchSetup                                           func(pw, name string)
-	setDest, setSrc                                     func(string)
-	exchToggle, trayShow                                func()
-	exchRunning                                         func() bool
-	exchHistory                                         func() (int, string)
-	trayHide                                            func() string
+	addFiles                                                        func([]string)
+	setCompress                                                     func(bool)
+	send, recv                                                      func()
+	recvText                                                        func() string
+	proxyRoundTrip                                                  func() string
+	masterUITest, minSizeCheck, trayTest                            func() string
+	exchSetup                                                       func(pw, name string)
+	setDest, setSrc                                                 func(string)
+	exchToggle, trayShow                                            func()
+	exchRunning                                                     func() bool
+	exchHistory                                                     func() (int, string)
+	trayHide                                                        func() string
 }
 
 // guiTestSteps выполняется в отдельной горутине; всё, что трогает окно, идёт через ui().
