@@ -1263,6 +1263,7 @@ func guiMain(test bool) int {
 				send:        doSend,
 				setRecvPw:   func(s string) { _ = recvPw.SetText(s) },
 				setOut:      func(s string) { _ = outLE.SetText(s) },
+				setExchDir:  func(s string) { _ = exchDirLE.SetText(s) },
 				recv:        doReceive,
 				recvText:    func() string { return recvText.Text() },
 				minSizeCheck: func() string {
@@ -1458,7 +1459,7 @@ func longTestText(head string) string {
 
 type guiHooks struct {
 	iconErr                                             error
-	setRelay, setSendText, setSendPw, setRecvPw, setOut func(string)
+	setRelay, setSendText, setSendPw, setRecvPw, setOut, setExchDir func(string)
 	addFiles                                            func([]string)
 	setCompress                                         func(bool)
 	send, recv                                          func()
@@ -1638,7 +1639,7 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 	dst3, _ := newWork()
 	exPw := "gui-exchange-pw"
 	ui(func() {
-		h.setOut(dst3)
+		h.setExchDir(dst3)
 		h.exchSetup(exPw, "GuiТест")
 		h.exchToggle()
 	})
