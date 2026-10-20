@@ -307,7 +307,7 @@ func saveSettingsTo(path string, s Settings) error {
 		"\r\nProxySel=" + itoa(s.ProxySel) +
 		"\r\nSaveSendPw=" + b2s(s.SaveSendPw) + "\r\nSendPw=" + sendPw +
 		"\r\nSaveRecvPw=" + b2s(s.SaveRecvPw) + "\r\nRecvPw=" + recvPw +
-		"\r\nExchName=" + s.ExchName + "\r\nExchDir=" + outDirForSave(resolveShareDir(s.ExchDir), true) + "\r\nExchAuto=" + b2s(s.ExchAuto) +
+		"\r\nExchName=" + s.ExchName + "\r\nExchDir=" + exchDirForSave(s.ExchDir) + "\r\nExchAuto=" + b2s(s.ExchAuto) +
 		"\r\nSaveExchPw=" + b2s(s.SaveExchPw) + "\r\nExchPw=" + exchPw + "\r\n"
 	for _, p := range s.Proxies {
 		text += "ProxyEntry=" + encodeProxy(p, seal) + "\r\n"
@@ -392,4 +392,12 @@ func resolveShareDir(dir string) string {
 		return filepath.Clean(d)
 	}
 	return filepath.Join(exeDir(), d)
+}
+
+// exchDirForSave: пустое значение (по умолчанию Share) не пишем; путь внутри папки программы пишем относительным.
+func exchDirForSave(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	return outDirForSave(resolveShareDir(dir), true)
 }

@@ -671,6 +671,22 @@ func selfTest() int {
 			if !conflictOK {
 				fails++
 				testLogf("EXCHANGE CONFLICT: FAIL got=%v names=%v", got4, ev4.Names)
+				if s4 != nil {
+					testLogf("  sender log: %s", s4.Log())
+				}
+			drain:
+				for {
+					select {
+					case ev := <-events:
+						testLogf("  event %s: %s", ev.Kind, ev.Msg)
+					default:
+						break drain
+					}
+				}
+				ents, _ := os.ReadDir(dstX)
+				for _, e := range ents {
+					testLogf("  dst: %s", e.Name())
+				}
 			} else {
 				testLogf("EXCHANGE CONFLICT rename (name-CONFLICT-device_date-time.ext): OK")
 			}
