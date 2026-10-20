@@ -18,6 +18,9 @@ import (
 
 const textFileName = "crocau-text.txt"
 
+// fromFileName - служебный файл с именем устройства-отправителя (нужен приёмнику для имён при конфликтах).
+const fromFileName = "crocau-from.txt"
+
 // ---------- Пароль -> код-фраза croc ----------
 // croc требует код не короче 6 символов; первые 4 символа - имя комнаты на relay (видно relay),
 // всё после 5-го символа - секрет для PAKE. Короткий пароль пользователя кладём в секретную часть.
@@ -461,7 +464,14 @@ func startSend(s Settings, pw, text string, items []string) (*Job, error) {
 	relays := relayList(s, secret)
 	var paths []string
 	compress := s.Compress
+	from := cleanDeviceName(s.ExchName)
 	if !compress {
+		if from != "" {
+			fp := filepath.Join(work, fromFileName)
+			if err := os.WriteFile(fp, []byte(from), 0600); err == nil {
+				paths = append(paths, fp)
+			}
+		}
 		if text != "" {
 			tp := filepath.Join(work, textFileName)
 			if err := os.WriteFile(tp, []byte(text), 0600); err != nil {
@@ -483,7 +493,7 @@ func startSend(s Settings, pw, text string, items []string) (*Job, error) {
 	if compress {
 		spec.Prep = func(j *Job) error {
 			j.setStatus("Архивирование...")
-			p, err := buildArchive(j, work, text, items)
+			p, err := buildArchive(j, work, text, from, items)
 			if err != nil {
 				return err
 			}
@@ -539,6 +549,7 @@ func startReceive(s Settings, pw, out string) (*Job, bool, error) {
 type RecvResult struct {
 	Text     string
 	HasFiles bool
+	From     string // имя устройства-отправителя (если прислал)
 }
 
 // finalizeReceive достаёт присланный текст из служебного файла и убирает пустую папку,
@@ -553,6 +564,11 @@ func finalizeReceive(j *Job, out string, created bool) RecvResult {
 		gotTextFile = true
 	} else if s := j.Stdout(); strings.TrimSpace(s) != "" {
 		r.Text = s // текст от обычного croc (--text)
+	}
+	ff := filepath.Join(out, fromFileName)
+	if b, err := os.ReadFile(ff); err == nil {
+		r.From = cleanDeviceName(string(b))
+		_ = os.Remove(ff)
 	}
 	n := countEntries(out)
 	if r.Text == "" || gotTextFile && n > j.preCount || !gotTextFile && n > j.preCount {

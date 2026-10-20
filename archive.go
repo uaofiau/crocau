@@ -174,7 +174,7 @@ func humanSize(n int64) string {
 var errCancelled = errors.New("отменено")
 
 // buildArchive собирает zip (текст + файлы/папки) в work и возвращает путь к нему.
-func buildArchive(j *Job, work, text string, items []string) (string, error) {
+func buildArchive(j *Job, work, text, from string, items []string) (string, error) {
 	entries, total, skipped, err := collectEntries(items)
 	if err != nil {
 		return "", err
@@ -198,6 +198,15 @@ func buildArchive(j *Job, work, text string, items []string) (string, error) {
 			return fail(err)
 		}
 		if _, err := io.WriteString(w, text); err != nil {
+			return fail(err)
+		}
+	}
+	if from != "" {
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: fromFileName, Method: zip.Deflate, Modified: time.Now()})
+		if err != nil {
+			return fail(err)
+		}
+		if _, err := io.WriteString(w, from); err != nil {
 			return fail(err)
 		}
 	}

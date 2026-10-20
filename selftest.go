@@ -198,7 +198,7 @@ func selfTest() int {
 			filepath.Join(asrc, "video.mp4"), filepath.Join(asrc, "папка2")}
 
 		// 6a) методы сжатия внутри архива
-		zp, err := buildArchive(nil, asrc, atext, items)
+		zp, err := buildArchive(nil, asrc, atext, "", items)
 		methodsOK := false
 		if err == nil {
 			if zr, e2 := zip.OpenReader(zp); e2 == nil {
@@ -654,6 +654,25 @@ func selfTest() int {
 			_, got3 := waitEv("received", 6*time.Second)
 			if s3 != nil {
 				s3.Kill()
+			}
+			// конфликт имён: файл с тем же именем уже есть в Share - он остаётся, новый получает пометку CONFLICT
+			cfgC := cfg
+			cfgC.ExchName = "Ноут/1"
+			lf2 := filepath.Join(filepath.Dir(lf), "lan файл.bin")
+			s4, _ := startSend(cfgC, "exchange-pw-1", "", []string{lf2})
+			ev4, got4 := waitEv("received", 40*time.Second)
+			if s4 != nil {
+				s4.Wait(20 * time.Second)
+			}
+			conflictOK := got4 && len(ev4.Names) == 1 && strings.Contains(ev4.Names[0], "lan файл-CONFLICT-Ноут_1_") &&
+				strings.HasSuffix(ev4.Names[0], ".bin") && fileEquals(filepath.Join(dstX, ev4.Names[0]), ldata) &&
+				fileEquals(filepath.Join(dstX, "lan файл.bin"), ldata) && !fileExists(filepath.Join(dstX, fromFileName)) &&
+				!fileExists(filepath.Join(dstX, ".crocau-in"))
+			if !conflictOK {
+				fails++
+				testLogf("EXCHANGE CONFLICT: FAIL got=%v names=%v", got4, ev4.Names)
+			} else {
+				testLogf("EXCHANGE CONFLICT rename (name-CONFLICT-device_date-time.ext): OK")
 			}
 			found := discoverPeers(1200*time.Millisecond, "me-2", roleRecv, []string{"127.0.0.1:29108"})
 			shortErr := (&Exchange{}).Start("ab", dstX, "x", func(ExchangeEvent) {})

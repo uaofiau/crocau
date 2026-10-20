@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -168,10 +169,11 @@ func (x *Exchange) stopped() bool {
 func (x *Exchange) loop(pw, out, relayAddr string, onEvent func(ExchangeEvent)) {
 	defer x.wg.Done()
 	local := Settings{Relay: relayAddr, ProxyMode: modeDirect}
+	staging := filepath.Join(out, ".crocau-in") // приём идёт сюда, затем содержимое переносится в Share с разбором конфликтов
 	backoff := time.Second
 	fails := 0
 	for !x.stopped() {
-		j, created, err := startReceive(local, pw, out)
+		j, created, err := startReceive(local, pw, staging)
 		if err != nil {
 			onEvent(ExchangeEvent{Time: time.Now(), Kind: "error", Msg: err.Error()})
 			if !x.sleep(5 * time.Second) {
@@ -191,11 +193,16 @@ func (x *Exchange) loop(pw, out, relayAddr string, onEvent func(ExchangeEvent)) 
 			return
 		}
 		if j.ExitCode() == 0 {
-			res := finalizeReceive(j, out, created)
-			names := newNames(out, j.pre)
+			res := finalizeReceive(j, staging, created)
 			j.Cleanup()
+			names, renamed := mergeIncoming(staging, out, res.From, time.Now())
+			_ = os.Remove(staging)
 			fails, backoff = 0, time.Second
-			onEvent(ExchangeEvent{Time: time.Now(), Kind: "received", Text: res.Text, Names: names, Files: res.HasFiles || len(names) > 0})
+			ev := ExchangeEvent{Time: time.Now(), Kind: "received", Text: res.Text, Names: names, Files: res.HasFiles || len(names) > 0}
+			if renamed > 0 {
+				ev.Msg = fmt.Sprintf("совпали имена, новые версии сохранены с пометкой CONFLICT: %d", renamed)
+			}
+			onEvent(ev)
 			continue
 		}
 		msg := lastLine(j.Log())
@@ -214,6 +221,72 @@ func (x *Exchange) loop(pw, out, relayAddr string, onEvent func(ExchangeEvent)) 
 			backoff *= 2
 		}
 	}
+}
+
+// cleanDeviceName оставляет в имени устройства только то, что допустимо в имени файла.
+func cleanDeviceName(n string) string {
+	n = strings.TrimSpace(n)
+	r := strings.Map(func(c rune) rune {
+		if c < 32 || strings.ContainsRune(`\/:*?"<>|`, c) {
+			return '_'
+		}
+		return c
+	}, n)
+	if rs := []rune(r); len(rs) > 40 {
+		r = string(rs[:40])
+	}
+	return strings.Trim(r, " .")
+}
+
+// conflictName: [имя]-CONFLICT-[устройство]_[дата]-[время].[расширение]
+func conflictName(name string, isDir bool, from string, t time.Time) string {
+	if from == "" {
+		from = "device"
+	}
+	stamp := t.Format("2006-01-02_15-04-05")
+	ext := ""
+	base := name
+	if !isDir {
+		ext = filepath.Ext(name)
+		base = strings.TrimSuffix(name, ext)
+	}
+	return base + "-CONFLICT-" + from + "_" + stamp + ext
+}
+
+// mergeIncoming переносит принятое из staging в папку Share. Если такое имя уже есть - существующий файл
+// остаётся нетронутым, а принятый сохраняется под именем с пометкой CONFLICT. Возвращает итоговые имена и число переименований.
+func mergeIncoming(staging, out, from string, t time.Time) ([]string, int) {
+	es, err := os.ReadDir(staging)
+	if err != nil {
+		return nil, 0
+	}
+	if err := os.MkdirAll(out, 0755); err != nil {
+		return nil, 0
+	}
+	var names []string
+	renamed := 0
+	for _, e := range es {
+		name := e.Name()
+		if name == textFileName || name == fromFileName {
+			continue
+		}
+		dst := name
+		if _, err := os.Lstat(filepath.Join(out, dst)); err == nil {
+			dst = conflictName(name, e.IsDir(), from, t)
+			for i := 2; ; i++ {
+				if _, err := os.Lstat(filepath.Join(out, dst)); err != nil {
+					break
+				}
+				dst = conflictName(name, e.IsDir(), from, t.Add(time.Duration(i-1)*time.Second))
+			}
+			renamed++
+		}
+		if err := os.Rename(filepath.Join(staging, name), filepath.Join(out, dst)); err != nil {
+			continue
+		}
+		names = append(names, dst)
+	}
+	return names, renamed
 }
 
 func (x *Exchange) sleep(d time.Duration) bool {

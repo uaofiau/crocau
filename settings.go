@@ -42,6 +42,7 @@ type Settings struct {
 	ExchPw     string
 	SaveExchPw bool
 	ExchAuto   bool
+	ExchDir    string // папка Share режима обмена (относительный путь отсчитывается от папки программы)
 	// SecretNote - предупреждение при загрузке (не сохраняется в файл).
 	SecretNote string
 	// Мастер-пароль: Protect = "account" (по умолчанию) или "master"; соль и контрольное значение лежат в файле.
@@ -187,6 +188,8 @@ func loadSettingsFrom(path string) Settings {
 			s.SendPw = open(v)
 		case "ExchName":
 			s.ExchName = v
+		case "ExchDir":
+			s.ExchDir = v
 		case "ExchAuto":
 			s.ExchAuto = v == "1"
 		case "SaveExchPw":
@@ -304,7 +307,7 @@ func saveSettingsTo(path string, s Settings) error {
 		"\r\nProxySel=" + itoa(s.ProxySel) +
 		"\r\nSaveSendPw=" + b2s(s.SaveSendPw) + "\r\nSendPw=" + sendPw +
 		"\r\nSaveRecvPw=" + b2s(s.SaveRecvPw) + "\r\nRecvPw=" + recvPw +
-		"\r\nExchName=" + s.ExchName + "\r\nExchAuto=" + b2s(s.ExchAuto) +
+		"\r\nExchName=" + s.ExchName + "\r\nExchDir=" + outDirForSave(resolveShareDir(s.ExchDir), true) + "\r\nExchAuto=" + b2s(s.ExchAuto) +
 		"\r\nSaveExchPw=" + b2s(s.SaveExchPw) + "\r\nExchPw=" + exchPw + "\r\n"
 	for _, p := range s.Proxies {
 		text += "ProxyEntry=" + encodeProxy(p, seal) + "\r\n"
@@ -372,6 +375,18 @@ func resolveOutDir(dir string) string {
 	d := strings.TrimSpace(dir)
 	if d == "" {
 		return filepath.Join(exeDir(), "received")
+	}
+	if filepath.IsAbs(d) {
+		return filepath.Clean(d)
+	}
+	return filepath.Join(exeDir(), d)
+}
+
+// resolveShareDir - папка Share режима обмена: по умолчанию "Share" рядом с программой.
+func resolveShareDir(dir string) string {
+	d := strings.TrimSpace(dir)
+	if d == "" {
+		d = "Share"
 	}
 	if filepath.IsAbs(d) {
 		return filepath.Clean(d)

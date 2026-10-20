@@ -159,6 +159,7 @@ func guiMain(test bool) int {
 		exchNameLE      *walk.LineEdit
 		exchPwLE        *walk.LineEdit
 		saveExchCB      *walk.CheckBox
+		exchDirLE       *walk.LineEdit
 		exchAutoCB      *walk.CheckBox
 		exchBtn         *walk.PushButton
 		exchStatusLbl   *walk.Label
@@ -323,7 +324,7 @@ func guiMain(test bool) int {
 			OutRel:     outRelCB.Checked(),
 			SaveSendPw: saveSendCB.Checked(), SendPw: savedPw(saveSendCB, sendPw),
 			SaveRecvPw: saveRecvCB.Checked(), RecvPw: savedPw(saveRecvCB, recvPw),
-			ExchName: strings.TrimSpace(exchNameLE.Text()), ExchAuto: exchAutoCB.Checked(),
+			ExchName: strings.TrimSpace(exchNameLE.Text()), ExchDir: exchDirLE.Text(), ExchAuto: exchAutoCB.Checked(),
 			SaveExchPw: saveExchCB.Checked(), ExchPw: savedPw(saveExchCB, exchPwLE), ProxyMode: curProxyMode(), ProxySel: selIndex(), Proxies: collectProxies(),
 		}
 	}
@@ -674,6 +675,9 @@ func guiMain(test bool) int {
 			_ = histLB.SetModel(append([]string{}, history...))
 			_ = histLB.SetCurrentIndex(0)
 			_ = exchText.SetText(crlf(ev.Text))
+			if ev.Msg != "" {
+				summary += " (" + ev.Msg + ")"
+			}
 			exchStatus("Получено: " + summary)
 			notify("crocau: получено", summary)
 		default:
@@ -687,7 +691,7 @@ func guiMain(test bool) int {
 			name = hostName
 		}
 		saveNow(collect())
-		err := exch.Start(pw, strings.TrimSpace(outLE.Text()), name, func(ev ExchangeEvent) {
+		err := exch.Start(pw, resolveShareDir(exchDirLE.Text()), name, func(ev ExchangeEvent) {
 			mw.Synchronize(func() { handleExch(ev) })
 		})
 		if err != nil {
@@ -1024,7 +1028,7 @@ func guiMain(test bool) int {
 						Title:  "Обмен",
 						Layout: VBox{},
 						Children: []Widget{
-							Label{Text: "Принимает файлы и текст от устройств в вашей сети.", ToolTipText: "Режим непрерывного обмена: устройство остаётся на связи, другие устройства сети находят его (кнопка «Найти в сети» на вкладке «Отправить») и присылают данные с этим же паролем. Файлы сохраняются в папку со вкладки «Получить»."},
+							Label{Text: "Принимает файлы и текст от устройств в вашей сети.", ToolTipText: "Режим непрерывного обмена: устройство остаётся на связи, другие устройства сети находят его (кнопка «Найти в сети» на вкладке «Отправить») и присылают данные с этим же паролем. Файлы сохраняются в папку Share."},
 							Composite{
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
@@ -1035,6 +1039,13 @@ func guiMain(test bool) int {
 									CheckBox{AssignTo: &saveExchCB, Text: "запомнить", Checked: st.SaveExchPw},
 									PushButton{Text: "Случайный", OnClicked: func() { _ = exchPwLE.SetText(randomPassword()) }},
 									HSpacer{},
+								},
+							},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									Label{Text: "Папка Share:"},
+									LineEdit{AssignTo: &exchDirLE, Text: resolveShareDir(st.ExchDir), ToolTipText: "Сюда приходят файлы в режиме обмена. По умолчанию папка Share рядом с программой (создаётся сама). Если файл с таким именем уже есть, он остаётся, а новый сохраняется как имя-CONFLICT-устройство_дата-время"},
 								},
 							},
 							Composite{
