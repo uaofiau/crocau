@@ -39,6 +39,7 @@ type Exchange struct {
 	relay    *Job
 	cur      *Job
 	stopResp func()
+	lastFail string // журнал последней неудачной попытки приёма (для диагностики)
 }
 
 func (x *Exchange) Running() bool {
@@ -206,7 +207,11 @@ func (x *Exchange) loop(pw, out, relayAddr string, onEvent func(ExchangeEvent)) 
 			continue
 		}
 		msg := lastLine(j.Log())
+		x.mu.Lock()
+		x.lastFail = j.Log()
+		x.mu.Unlock()
 		j.Cleanup()
+		_ = os.Remove(staging)
 		if x.stopped() {
 			return
 		}

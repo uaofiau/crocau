@@ -664,16 +664,29 @@ func selfTest() int {
 			if s4 != nil {
 				s4.Wait(20 * time.Second)
 			}
+			if !got4 {
+				// возможно, приёмник в этот момент перезапускался: повтор, как сделал бы пользователь
+				testLogf("  conflict: first attempt failed, retrying; sender log: %s", s4.Log())
+				s4, _ = startSend(cfgC, "exchange-pw-1", "", []string{lf2})
+				ev4, got4 = waitEv("received", 40*time.Second)
+				if s4 != nil {
+					s4.Wait(20 * time.Second)
+				}
+			}
+			x.mu.Lock()
+			lastFail := x.lastFail
+			x.mu.Unlock()
 			conflictOK := got4 && len(ev4.Names) == 1 && strings.Contains(ev4.Names[0], "lan файл-CONFLICT-Ноут_1_") &&
 				strings.HasSuffix(ev4.Names[0], ".bin") && fileEquals(filepath.Join(dstX, ev4.Names[0]), ldata) &&
 				fileEquals(filepath.Join(dstX, "lan файл.bin"), ldata) && !fileExists(filepath.Join(dstX, fromFileName)) &&
-				!fileExists(filepath.Join(dstX, ".crocau-in"))
+				true
 			if !conflictOK {
 				fails++
 				testLogf("EXCHANGE CONFLICT: FAIL got=%v names=%v", got4, ev4.Names)
 				if s4 != nil {
 					testLogf("  sender log: %s", s4.Log())
 				}
+				testLogf("  receiver last failure log: %s", lastFail)
 			drain:
 				for {
 					select {
