@@ -177,6 +177,7 @@ func guiMain(test bool) int {
 	var curCreated bool
 	checking := false
 	var exch Exchange
+	var shareW ShareWatcher
 	var peers []Peer
 	var curHost *HostSession
 	var history, histTexts []string
@@ -718,7 +719,6 @@ func guiMain(test bool) int {
 		startExchange()
 	}
 	// ---------- отправка из Share ----------
-	var shareW ShareWatcher
 	var shareMu sync.Mutex
 	shareCancel := make(chan struct{})
 	var shareCancelOnce sync.Once
