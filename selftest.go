@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -702,6 +703,82 @@ func selfTest() int {
 				}
 			} else {
 				testLogf("EXCHANGE CONFLICT rename (name-CONFLICT-device_date-time.ext): OK")
+			}
+			// отправка из Share кнопкой: всё содержимое одной передачей на устройство в режиме обмена
+			{
+				shareDir, _ := newWork()
+				_ = os.WriteFile(filepath.Join(shareDir, "s1 файл.txt"), []byte("share one"), 0644)
+				_ = os.MkdirAll(filepath.Join(shareDir, "папка Share"), 0755)
+				_ = os.WriteFile(filepath.Join(shareDir, "папка Share", "a.txt"), []byte("in dir"), 0644)
+				_ = os.WriteFile(filepath.Join(shareDir, ".скрытый"), []byte("x"), 0644)
+				names := shareNames(shareDir)
+				sok, sfail := shareSend(Settings{ExchName: "ШареТест", ProxyMode: modeDirect}, "exchange-pw-1", shareDir, names, []string{"127.0.0.1:29109"}, nil, func(string) {})
+				evS, gotS := waitEv("received", 40*time.Second)
+				shareOK := len(names) == 2 && sok == 1 && sfail == 0 && gotS && len(evS.Names) == 2 &&
+					fileEquals(filepath.Join(dstX, "s1 файл.txt"), []byte("share one")) &&
+					fileEquals(filepath.Join(dstX, "папка Share", "a.txt"), []byte("in dir")) && !fileExists(filepath.Join(dstX, ".скрытый"))
+				if shareOK {
+					testLogf("SHARE SEND (button: all of Share in one transfer, hidden skipped): OK")
+				} else {
+					fails++
+					testLogf("SHARE SEND: FAIL names=%v ok=%d fail=%d got=%v ev=%v", names, sok, sfail, gotS, evS.Names)
+				}
+			}
+			// слежение за Share: база не отправляется, новое/изменённое/вернувшееся уходит, принятое (Mark) - нет
+			{
+				wdir, _ := newWork()
+				_ = os.WriteFile(filepath.Join(wdir, "old.txt"), []byte("old"), 0644)
+				var wmu sync.Mutex
+				var sent []string
+				var w ShareWatcher
+				w.Start(wdir, 150*time.Millisecond, func(n []string) bool {
+					wmu.Lock()
+					sent = append(sent, strings.Join(n, ","))
+					wmu.Unlock()
+					return true
+				})
+				count := func(name string) int {
+					wmu.Lock()
+					defer wmu.Unlock()
+					c := 0
+					for _, x := range sent {
+						if x == name {
+							c++
+						}
+					}
+					return c
+				}
+				waitCount := func(name string, n int) bool {
+					end := time.Now().Add(4 * time.Second)
+					for time.Now().Before(end) {
+						if count(name) >= n {
+							return true
+						}
+						time.Sleep(50 * time.Millisecond)
+					}
+					return false
+				}
+				time.Sleep(500 * time.Millisecond)
+				baseOK := count("old.txt") == 0
+				_ = os.WriteFile(filepath.Join(wdir, "new.txt"), []byte("n1"), 0644)
+				newOK := waitCount("new.txt", 1)
+				_ = os.WriteFile(filepath.Join(wdir, "rcv.txt"), []byte("received"), 0644)
+				w.Mark([]string{"rcv.txt"})
+				time.Sleep(900 * time.Millisecond)
+				markOK := count("rcv.txt") == 0
+				_ = os.WriteFile(filepath.Join(wdir, "new.txt"), []byte("n1 changed longer"), 0644)
+				chgOK := waitCount("new.txt", 2)
+				_ = os.Remove(filepath.Join(wdir, "new.txt"))
+				time.Sleep(600 * time.Millisecond)
+				_ = os.WriteFile(filepath.Join(wdir, "new.txt"), []byte("again"), 0644)
+				backOK := waitCount("new.txt", 3)
+				w.Stop()
+				if baseOK && newOK && markOK && chgOK && backOK && !w.Running() {
+					testLogf("SHARE WATCH (baseline kept, new/changed/re-added sent, received skipped): OK")
+				} else {
+					fails++
+					testLogf("SHARE WATCH: FAIL base=%v new=%v mark=%v changed=%v readded=%v sent=%v", baseOK, newOK, markOK, chgOK, backOK, sent)
+				}
 			}
 			found := discoverPeers(1200*time.Millisecond, "me-2", roleRecv, []string{"127.0.0.1:29108"})
 			shortErr := (&Exchange{}).Start("ab", dstX, "x", func(ExchangeEvent) {})

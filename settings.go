@@ -42,6 +42,8 @@ type Settings struct {
 	ExchPw     string
 	SaveExchPw bool
 	ExchAuto   bool
+	ExchTo     string // кому отправлять содержимое Share (пусто - всем найденным)
+	ExchWatch  bool   // следить за Share и отправлять новое
 	ExchDir    string // папка Share режима обмена (относительный путь отсчитывается от папки программы)
 	// SecretNote - предупреждение при загрузке (не сохраняется в файл).
 	SecretNote string
@@ -188,6 +190,10 @@ func loadSettingsFrom(path string) Settings {
 			s.SendPw = open(v)
 		case "ExchName":
 			s.ExchName = v
+		case "ExchTo":
+			s.ExchTo = v
+		case "ExchWatch":
+			s.ExchWatch = v == "1"
 		case "ExchDir":
 			s.ExchDir = v
 		case "ExchAuto":
@@ -307,7 +313,7 @@ func saveSettingsTo(path string, s Settings) error {
 		"\r\nProxySel=" + itoa(s.ProxySel) +
 		"\r\nSaveSendPw=" + b2s(s.SaveSendPw) + "\r\nSendPw=" + sendPw +
 		"\r\nSaveRecvPw=" + b2s(s.SaveRecvPw) + "\r\nRecvPw=" + recvPw +
-		"\r\nExchName=" + s.ExchName + "\r\nExchDir=" + exchDirForSave(s.ExchDir) + "\r\nExchAuto=" + b2s(s.ExchAuto) +
+		"\r\nExchName=" + s.ExchName + "\r\nExchTo=" + s.ExchTo + "\r\nExchWatch=" + b2s(s.ExchWatch) + "\r\nExchDir=" + exchDirForSave(s.ExchDir) + "\r\nExchAuto=" + b2s(s.ExchAuto) +
 		"\r\nSaveExchPw=" + b2s(s.SaveExchPw) + "\r\nExchPw=" + exchPw + "\r\n"
 	for _, p := range s.Proxies {
 		text += "ProxyEntry=" + encodeProxy(p, seal) + "\r\n"

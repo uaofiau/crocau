@@ -96,6 +96,9 @@ func (x *Exchange) Start(pw, out, name string, onEvent func(ExchangeEvent)) erro
 	if strings.TrimSpace(out) == "" {
 		return errors.New("укажите папку для сохранения (вкладка «Получить»)")
 	}
+	if err := os.MkdirAll(out, 0755); err != nil {
+		return fmt.Errorf("не удалось создать папку Share: %v", err)
+	}
 	port := lanRelayPorts[0]
 
 	work, err := newWork()

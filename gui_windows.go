@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -160,6 +161,9 @@ func guiMain(test bool) int {
 		exchPwLE        *walk.LineEdit
 		saveExchCB      *walk.CheckBox
 		exchDirLE       *walk.LineEdit
+		shareToCB       *walk.ComboBox
+		shareWatchCB    *walk.CheckBox
+		shareSendBtn    *walk.PushButton
 		exchAutoCB      *walk.CheckBox
 		exchBtn         *walk.PushButton
 		exchStatusLbl   *walk.Label
@@ -324,7 +328,7 @@ func guiMain(test bool) int {
 			OutRel:     outRelCB.Checked(),
 			SaveSendPw: saveSendCB.Checked(), SendPw: savedPw(saveSendCB, sendPw),
 			SaveRecvPw: saveRecvCB.Checked(), RecvPw: savedPw(saveRecvCB, recvPw),
-			ExchName: strings.TrimSpace(exchNameLE.Text()), ExchDir: exchDirLE.Text(), ExchAuto: exchAutoCB.Checked(),
+			ExchName: strings.TrimSpace(exchNameLE.Text()), ExchDir: exchDirLE.Text(), ExchTo: shareToCB.Text(), ExchWatch: shareWatchCB.Checked(), ExchAuto: exchAutoCB.Checked(),
 			SaveExchPw: saveExchCB.Checked(), ExchPw: savedPw(saveExchCB, exchPwLE), ProxyMode: curProxyMode(), ProxySel: selIndex(), Proxies: collectProxies(),
 		}
 	}
@@ -600,9 +604,11 @@ func guiMain(test bool) int {
 				peers = found
 				destItems := []string{destInternet, destWait}
 				srcItems := []string{destInternet}
+				shareItems := []string{allDevices}
 				for _, p := range found {
 					if p.Role == roleRecv {
 						destItems = append(destItems, p.Label())
+						shareItems = append(shareItems, p.Label())
 					} else if p.Role == roleSend {
 						srcItems = append(srcItems, p.Label())
 					}
@@ -610,7 +616,7 @@ func guiMain(test bool) int {
 				for _, c := range []struct {
 					cb    *walk.ComboBox
 					items []string
-				}{{destCB, destItems}, {srcCB, srcItems}} {
+				}{{destCB, destItems}, {srcCB, srcItems}, {shareToCB, shareItems}} {
 					cur := c.cb.Text()
 					_ = c.cb.SetModel(c.items)
 					if cur != "" {
@@ -675,6 +681,7 @@ func guiMain(test bool) int {
 			_ = histLB.SetModel(append([]string{}, history...))
 			_ = histLB.SetCurrentIndex(0)
 			_ = exchText.SetText(crlf(ev.Text))
+			shareW.Mark(ev.Names)
 			if ev.Msg != "" {
 				summary += " (" + ev.Msg + ")"
 			}
@@ -709,6 +716,90 @@ func guiMain(test bool) int {
 			return
 		}
 		startExchange()
+	}
+	// ---------- отправка из Share ----------
+	var shareW ShareWatcher
+	var shareMu sync.Mutex
+	shareCancel := make(chan struct{})
+	var shareCancelOnce sync.Once
+	// sendShareNow отправляет перечисленные элементы Share (nil - всё) на устройства из поля «Кому»; блокирует поток.
+	sendShareNow := func(names []string, target, pw, dir string, cfg Settings, peersCopy []Peer) bool {
+		if !shareMu.TryLock() {
+			mw.Synchronize(func() { exchStatus("Share: предыдущая отправка ещё идёт") })
+			return false
+		}
+		defer shareMu.Unlock()
+		if names == nil {
+			names = shareNames(dir)
+		}
+		if len(names) == 0 {
+			mw.Synchronize(func() { exchStatus("Share: в папке нет файлов для отправки") })
+			return true
+		}
+		addrs := resolveShareTargets(target, peersCopy, instanceID)
+		if len(addrs) == 0 {
+			mw.Synchronize(func() {
+				exchStatus("Share: не найдено устройств в режиме обмена (включите обмен там или впишите IP)")
+			})
+			return false
+		}
+		mw.Synchronize(func() {
+			exchStatus(fmt.Sprintf("Share: отправка %d эл. на устройств: %d...", len(names), len(addrs)))
+		})
+		var lastMsg string
+		ok, fail := shareSend(cfg, pw, dir, names, addrs, shareCancel, func(m string) { lastMsg = m })
+		mw.Synchronize(func() {
+			msg := fmt.Sprintf("Share: отправлено на устройств: %d", ok)
+			if fail > 0 {
+				msg += fmt.Sprintf(", не удалось: %d", fail)
+				if lastMsg != "" {
+					msg += " (" + lastMsg + ")"
+				}
+			}
+			exchStatus(msg)
+			if !shareW.Running() || fail > 0 {
+				notify("crocau: Share", msg)
+			}
+		})
+		return fail == 0
+	}
+	shareArgs := func() (string, string, string, Settings, []Peer, bool) {
+		pw := strings.TrimSpace(exchPwLE.Text())
+		if utf8.RuneCountInString(pw) < exchangeMinPw {
+			warn("Укажите пароль обмена (от 3 символов): он же нужен для отправки из Share.")
+			return "", "", "", Settings{}, nil, false
+		}
+		cfg := collect()
+		if cfg.ExchName == "" {
+			cfg.ExchName = hostName
+		}
+		return shareToCB.Text(), pw, resolveShareDir(exchDirLE.Text()), cfg, append([]Peer{}, peers...), true
+	}
+	doShareSend := func() {
+		target, pw, dir, cfg, pc, ok := shareArgs()
+		if !ok {
+			return
+		}
+		saveNow(cfg)
+		_ = os.MkdirAll(dir, 0755)
+		go sendShareNow(nil, target, pw, dir, cfg, pc)
+	}
+	toggleShareWatch := func() {
+		if !shareWatchCB.Checked() {
+			shareW.Stop()
+			exchStatus("Слежение за Share выключено")
+			return
+		}
+		target, pw, dir, cfg, pc, ok := shareArgs()
+		if !ok {
+			shareWatchCB.SetChecked(false)
+			return
+		}
+		saveNow(cfg)
+		shareW.Start(dir, 3*time.Second, func(names []string) bool {
+			return sendShareNow(names, target, pw, dir, cfg, pc)
+		})
+		exchStatus("Слежение за Share включено: новые и изменённые файлы уходят на устройства из поля «Кому»")
 	}
 	fwAction := func(open bool) {
 		_ = fwStatusLbl.SetText("Брандмауэр: ждём подтверждение администратора...")
@@ -1051,6 +1142,24 @@ func guiMain(test bool) int {
 							Composite{
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
+									Label{Text: "Кому:"},
+									ComboBox{AssignTo: &shareToCB, Editable: true, Model: []string{allDevices}, MinSize: Size{Width: 170},
+										ToolTipText: "Куда отправлять содержимое Share: все найденные устройства в режиме обмена, одно из списка или IP (несколько - через «;»). Пароль берётся из поля «Пароль» выше"},
+									PushButton{Text: "Найти", OnClicked: refreshPeers},
+									HSpacer{},
+								},
+							},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									PushButton{AssignTo: &shareSendBtn, Text: "Отправить содержимое Share", OnClicked: doShareSend, ToolTipText: "Отправить всё, что сейчас лежит в Share, на выбранные устройства. Если там уже есть файл с таким именем, он не затирается: новый получит пометку CONFLICT"},
+									CheckBox{AssignTo: &shareWatchCB, Text: "Следить за Share", OnClicked: toggleShareWatch, ToolTipText: "Новые и изменённые файлы в Share сами уходят на выбранные устройства. Уже лежавшее при включении не отправляется (для него кнопка слева). Удаления не передаются"},
+									HSpacer{},
+								},
+							},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
 									CheckBox{AssignTo: &exchAutoCB, Text: "Включать при запуске", Checked: st.ExchAuto, ToolTipText: "Нужен запомненный пароль"},
 									HSpacer{},
 									PushButton{AssignTo: &exchBtn, Text: "Включить обмен", MinSize: Size{Width: 130}, OnClicked: toggleExchange},
@@ -1216,17 +1325,28 @@ func guiMain(test bool) int {
 	refreshMasterUI()
 	widenTooltips(560, 30000)
 	refreshFW()
+	if st.ExchTo != "" {
+		_ = shareToCB.SetText(st.ExchTo)
+	}
 	exchStatus("Выключен")
 	if !test {
 		refreshPeers() // сразу заполнить список устройств
 		if st.ExchAuto && st.SaveExchPw && st.ExchPw != "" && !settingsReadOnly {
 			mw.Synchronize(startExchange)
 		}
+		if st.ExchWatch && st.ExchPw != "" {
+			mw.Synchronize(func() {
+				shareWatchCB.SetChecked(true)
+				toggleShareWatch()
+			})
+		}
 	}
 
 	win.DragAcceptFiles(mw.Handle(), true)
 	mw.DropFiles().Attach(func(files []string) { addPaths(files) })
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
+		shareCancelOnce.Do(func() { close(shareCancel) })
+		shareW.Stop()
 		exch.Stop()
 		if curHost != nil {
 			curHost.Close()
