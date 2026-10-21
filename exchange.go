@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -170,7 +171,15 @@ func (x *Exchange) stopped() bool {
 func (x *Exchange) loop(pw, out, relayAddr string, onEvent func(ExchangeEvent)) {
 	defer x.wg.Done()
 	local := Settings{Relay: relayAddr, ProxyMode: modeDirect}
-	staging := filepath.Join(out, ".crocau-in") // приём идёт сюда, затем содержимое переносится в Share с разбором конфликтов
+	// приём идёт во временную папку (не в Share, чтобы в ней ничего не мигало), затем содержимое переносится в Share с разбором конфликтов
+	stageRoot, serr := newWork()
+	if serr != nil {
+		onEvent(ExchangeEvent{Time: time.Now(), Kind: "error", Msg: serr.Error()})
+		return
+	}
+	defer os.RemoveAll(stageRoot)
+	staging := filepath.Join(stageRoot, "in")
+	lastErr := ""
 	backoff := time.Second
 	fails := 0
 	for !x.stopped() {
@@ -216,7 +225,8 @@ func (x *Exchange) loop(pw, out, relayAddr string, onEvent func(ExchangeEvent)) 
 			return
 		}
 		fails++
-		if fails == 3 || fails%20 == 0 {
+		if msg != lastErr || fails%20 == 0 {
+			lastErr = msg
 			onEvent(ExchangeEvent{Time: time.Now(), Kind: "error", Msg: "Приём не удался (попыток подряд: " + itoa(fails) + "): " + msg})
 		}
 		if !x.sleep(backoff) {
@@ -286,7 +296,7 @@ func mergeIncoming(staging, out, from string, t time.Time) ([]string, int) {
 			}
 			renamed++
 		}
-		if err := os.Rename(filepath.Join(staging, name), filepath.Join(out, dst)); err != nil {
+		if err := moveAny(filepath.Join(staging, name), filepath.Join(out, dst)); err != nil {
 			continue
 		}
 		names = append(names, dst)
@@ -342,4 +352,43 @@ func mustAtoi(s string) int {
 		}
 	}
 	return n
+}
+
+// moveAny переносит файл или папку; если переименование невозможно (другой диск), копирует и удаляет оригинал.
+func moveAny(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	if err := copyTree(src, dst); err != nil {
+		_ = os.RemoveAll(dst)
+		return err
+	}
+	return os.RemoveAll(src)
+}
+
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, p)
+		t := filepath.Join(dst, rel)
+		if fi.IsDir() {
+			return os.MkdirAll(t, 0755)
+		}
+		in, err := os.Open(p)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.Create(t)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			return err
+		}
+		return out.Close()
+	})
 }
