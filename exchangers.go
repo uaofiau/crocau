@@ -75,6 +75,53 @@ var xProviders = []xProvider{
 		}
 		return fixTmpfiles(r.Data.URL), nil
 	}},
+	{name: "tmpfile.link", max: 100 << 20, keep: "7 суток", upload: func(ctx context.Context, c *http.Client, file, name string, size int64, prog func(int64)) (string, error) {
+		body, err := postMultipart(ctx, c, "https://tmpfile.link/api/upload", nil, "file", file, name, size, prog)
+		if err != nil {
+			return "", err
+		}
+		var r map[string]interface{}
+		if err := json.Unmarshal([]byte(body), &r); err == nil {
+			for _, k := range []string{"downloadLink", "downloadLinkEncoded", "url", "link"} {
+				if v, ok := r[k].(string); ok && strings.HasPrefix(v, "http") {
+					return v, nil
+				}
+			}
+		}
+		return uploadTextURL(body)
+	}},
+	{name: "x0.at", max: 100 << 20, keep: "несколько суток", upload: func(ctx context.Context, c *http.Client, file, name string, size int64, prog func(int64)) (string, error) {
+		body, err := postMultipart(ctx, c, "https://x0.at/", nil, "file", file, name, size, prog)
+		if err != nil {
+			return "", err
+		}
+		return uploadTextURL(body)
+	}},
+	{name: "qu.ax", max: 200 << 20, keep: "несколько суток", upload: func(ctx context.Context, c *http.Client, file, name string, size int64, prog func(int64)) (string, error) {
+		body, err := postMultipart(ctx, c, "https://qu.ax/upload.php", nil, "files[]", file, name, size, prog)
+		if err != nil {
+			return "", err
+		}
+		var r struct {
+			Files []struct {
+				URL string `json:"url"`
+			} `json:"files"`
+		}
+		if err := json.Unmarshal([]byte(body), &r); err != nil || len(r.Files) == 0 || r.Files[0].URL == "" {
+			return "", errors.New("неожиданный ответ")
+		}
+		return r.Files[0].URL, nil
+	}},
+	{name: "oshi.at", max: 1 << 30, keep: "3 суток", upload: func(ctx context.Context, c *http.Client, file, name string, size int64, prog func(int64)) (string, error) {
+		body, err := postMultipart(ctx, c, "https://oshi.at/", map[string]string{"expire": "4320", "shorturl": "0"}, "f", file, name, size, prog)
+		if err != nil {
+			return "", err
+		}
+		if m := regexp.MustCompile(`DL:\s*(https?://\S+)`).FindStringSubmatch(body); m != nil {
+			return m[1], nil
+		}
+		return "", errors.New("неожиданный ответ")
+	}},
 	{name: "uguu.se", max: 128 << 20, keep: "3 часа", upload: func(ctx context.Context, c *http.Client, file, name string, size int64, prog func(int64)) (string, error) {
 		body, err := postMultipart(ctx, c, "https://uguu.se/upload?output=text", nil, "files[]", file, name, size, prog)
 		if err != nil {
@@ -135,6 +182,11 @@ func postMultipart(ctx context.Context, c *http.Client, urlStr string, fields ma
 	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 	req.Header.Set("User-Agent", uploaderUA)
 	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	if u, perr := url.Parse(urlStr); perr == nil && u.Host != "" {
+		req.Header.Set("Origin", u.Scheme+"://"+u.Host)
+		req.Header.Set("Referer", u.Scheme+"://"+u.Host+"/")
+	}
 	resp, err := c.Do(req)
 	if err != nil {
 		return "", err

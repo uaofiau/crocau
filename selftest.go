@@ -1176,7 +1176,11 @@ func netTest() int {
 			if derr != nil {
 				testLogf("EXCHANGER %s: FAIL download %s: %v", pr.name, link, derr)
 			} else if !fileEquals(p, payload) {
-				testLogf("EXCHANGER %s: FAIL content differs (%s)", pr.name, link)
+				b, _ := os.ReadFile(p)
+				if len(b) > 120 {
+					b = b[:120]
+				}
+				testLogf("EXCHANGER %s: FAIL content differs (%s) got %q", pr.name, link, string(b))
 			} else {
 				testLogf("EXCHANGER %s: OK %s", pr.name, link)
 			}
