@@ -24,6 +24,13 @@ import (
 const sendToName = "Crocau.lnk"
 
 var (
+	modOle32             = windows.NewLazySystemDLL("ole32.dll")
+	procCoInitializeEx   = modOle32.NewProc("CoInitializeEx")
+	procCoUninitialize   = modOle32.NewProc("CoUninitialize")
+	procCoCreateInstance = modOle32.NewProc("CoCreateInstance")
+)
+
+var (
 	clsidShellLink  = windows.GUID{Data1: 0x00021401, Data4: [8]byte{0xC0, 0, 0, 0, 0, 0, 0, 0x46}}
 	iidIShellLinkW  = windows.GUID{Data1: 0x000214F9, Data4: [8]byte{0xC0, 0, 0, 0, 0, 0, 0, 0x46}}
 	iidIPersistFile = windows.GUID{Data1: 0x0000010B, Data4: [8]byte{0xC0, 0, 0, 0, 0, 0, 0, 0x46}}
@@ -61,11 +68,12 @@ func withShellLink(f func(psl, ppf uintptr) error) error {
 	go func() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
-		_ = windows.CoInitializeEx(0, windows.COINIT_APARTMENTTHREADED)
-		defer windows.CoUninitialize()
+		_, _, _ = procCoInitializeEx.Call(0, 2) // COINIT_APARTMENTTHREADED
+		defer procCoUninitialize.Call()
 		var psl uintptr
-		if err := windows.CoCreateInstance(&clsidShellLink, nil, windows.CLSCTX_INPROC_SERVER, &iidIShellLinkW, (unsafe.Pointer)(&psl)); err != nil || psl == 0 {
-			ch <- fmt.Errorf("не удалось создать ярлык: %v", err)
+		if hr, _, _ := procCoCreateInstance.Call(uintptr(unsafe.Pointer(&clsidShellLink)), 0, 1, // CLSCTX_INPROC_SERVER
+			uintptr(unsafe.Pointer(&iidIShellLinkW)), uintptr(unsafe.Pointer(&psl))); hr != 0 || psl == 0 {
+			ch <- fmt.Errorf("не удалось создать ярлык: 0x%x", hr)
 			return
 		}
 		defer comRelease(psl)
