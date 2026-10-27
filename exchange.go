@@ -183,6 +183,7 @@ func (x *Exchange) loop(pw, out, relayAddr string, onEvent func(ExchangeEvent)) 
 	defer os.RemoveAll(stageRoot)
 	staging := filepath.Join(stageRoot, "in")
 	lastErr := ""
+	hfails := 0
 	backoff := time.Second
 	fails := 0
 	for !x.stopped() {
@@ -210,7 +211,7 @@ func (x *Exchange) loop(pw, out, relayAddr string, onEvent func(ExchangeEvent)) 
 			j.Cleanup()
 			names, renamed := mergeIncoming(staging, out, res.From, time.Now())
 			_ = os.Remove(staging)
-			fails, backoff = 0, time.Second
+			fails, backoff, hfails = 0, time.Second, 0
 			ev := ExchangeEvent{Time: time.Now(), Kind: "received", Text: res.Text, Names: names, Files: res.HasFiles || len(names) > 0}
 			if renamed > 0 {
 				ev.Msg = fmt.Sprintf("совпали имена, новые версии сохранены с пометкой CONFLICT: %d", renamed)
@@ -227,6 +228,17 @@ func (x *Exchange) loop(pw, out, relayAddr string, onEvent func(ExchangeEvent)) 
 		if x.stopped() {
 			return
 		}
+		if isHandshakeError(msg + "\n" + x.lastFailText()) {
+			// чужой пароль или одновременная попытка: приём не «ломается», поэтому задержка небольшая (до 4 с) -
+			// иначе устройство подолгу не слушает и законный отправитель не может подключиться
+			hfails++
+			d := 500 * time.Millisecond << uint(min(hfails-1, 3))
+			if !x.sleep(d) {
+				return
+			}
+			continue
+		}
+		hfails = 0
 		fails++
 		if msg != lastErr || fails%20 == 0 {
 			lastErr = msg
@@ -394,4 +406,17 @@ func copyTree(src, dst string) error {
 		}
 		return out.Close()
 	})
+}
+
+func (x *Exchange) lastFailText() string {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return x.lastFail
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
