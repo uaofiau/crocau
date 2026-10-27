@@ -82,13 +82,6 @@ var xProviders = []xProvider{
 		}
 		return uploadTextURL(body)
 	}},
-	{name: "temp.sh", max: 4 << 30, keep: "3 суток", upload: func(ctx context.Context, c *http.Client, file, name string, size int64, prog func(int64)) (string, error) {
-		body, err := postMultipart(ctx, c, "https://temp.sh/upload", nil, "file", file, name, size, prog)
-		if err != nil {
-			return "", err
-		}
-		return uploadTextURL(body)
-	}},
 }
 
 // fixTmpfiles: страница tmpfiles.org/123/name -> прямая ссылка tmpfiles.org/dl/123/name.
