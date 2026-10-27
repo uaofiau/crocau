@@ -1187,6 +1187,38 @@ func netTest() int {
 		}
 		xProviders = saved
 	}
+	// полный путь через настоящие обменники: архив с паролем -> ссылка -> скачивание -> распаковка
+	{
+		xs := Settings{ProxyMode: modeDirect, ExchName: "CI"}
+		sj, err := startExchSend(xs, "net123", "текст через обменник", nil, false)
+		if err != nil {
+			testLogf("EXCHANGE FULL: FAIL %v", err)
+		} else {
+			okS := sj.Wait(150*time.Second) && sj.ExitCode() == 0
+			link := sj.Result()
+			dst, _ := newWork()
+			var res RecvResult
+			okR := false
+			var rj *Job
+			if okS {
+				var created bool
+				rj, created, err = startExchRecv(xs, "net123", link, dst)
+				if err == nil {
+					okR = rj.Wait(120*time.Second) && rj.ExitCode() == 0
+					res = finalizeReceive(rj, dst, created)
+				}
+			}
+			if okS && okR && res.Text == "текст через обменник" {
+				testLogf("EXCHANGE FULL (real exchanger, AES password, text): OK %s", link)
+			} else {
+				testLogf("EXCHANGE FULL: FAIL send=%v recv=%v text=%q", okS, okR, res.Text)
+				testLogf("  send log: %s", sj.Log())
+				if rj != nil {
+					testLogf("  recv log: %s", rj.Log())
+				}
+			}
+		}
+	}
 	text := "проверка публичных relay"
 	dst, _ := newWork()
 	pw := "net" + randomPassword()
