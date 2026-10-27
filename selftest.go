@@ -1034,7 +1034,7 @@ func selfTest() int {
 		if ok9 && len(lines) == 2 {
 			exeLink := strings.TrimSpace(lines[1][strings.Index(lines[1], ": ")+2:])
 			pdir, _ := newWork()
-			cj, err := startExchRecv(cfg, "", exeLink, pdir)
+			cj, _, err := startExchRecv(cfg, "", exeLink, pdir)
 			if err == nil {
 				cj.Wait(60 * time.Second)
 			}

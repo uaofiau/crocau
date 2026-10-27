@@ -202,18 +202,6 @@ func uploadChain(ctx context.Context, r Route, file, name string, prog func(done
 	return "", "", errors.New(strings.Join(errs, "; "))
 }
 
-func humanSize(n int64) string {
-	switch {
-	case n >= 1<<30:
-		return fmt.Sprintf("%.1f ГБ", float64(n)/(1<<30))
-	case n >= 1<<20:
-		return fmt.Sprintf("%.1f МБ", float64(n)/(1<<20))
-	case n >= 1<<10:
-		return fmt.Sprintf("%.1f КБ", float64(n)/(1<<10))
-	}
-	return fmt.Sprintf("%d Б", n)
-}
-
 // normalizeLink приводит вставленную ссылку к прямой (убирает пробелы, чинит tmpfiles).
 var linkRe = regexp.MustCompile(`https?://[^\s<>"]+`)
 
