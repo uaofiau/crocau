@@ -5,6 +5,7 @@
 //	crocau.exe --croc ...    - внутренний режим: работает как croc (запускается самой программой на каждую передачу)
 //	crocau.exe --selftest    - самотест передачи (для CI)
 //	crocau.exe --guitest     - тест окна (для CI)
+//	crocau.exe --send путь.. - окно с добавленными файлами (меню Проводника «Отправить через Crocau»)
 package main
 
 import (
@@ -33,6 +34,11 @@ func main() {
 			os.Exit(fwSelfTest())
 		case "--nettest":
 			os.Exit(netTest())
+		case "--send":
+			// из меню Проводника: окно с выбранными файлами (или пересылка в уже открытое окно)
+			if code := shellSendMain(os.Args[2:]); code >= 0 {
+				os.Exit(code)
+			}
 		case "--guitest":
 			os.Exit(guiMain(true))
 		}

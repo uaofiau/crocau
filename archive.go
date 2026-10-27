@@ -185,6 +185,7 @@ func buildArchive(j *Job, work, text, from string, items []string) (string, erro
 		return "", err
 	}
 	zw := zip.NewWriter(f)
+	_ = zw.SetComment("crocau") // метка: так принимающий crocau узнаёт свои архивы, скачанные по ссылке
 	zw.RegisterCompressor(zip.Deflate, func(w io.Writer) (io.WriteCloser, error) { return flate.NewWriter(w, zipLevel) })
 	fail := func(e error) (string, error) {
 		_ = zw.Close()
@@ -301,7 +302,10 @@ func safeArchiveName(name string) bool {
 }
 
 // extractZip распаковывает архив в out, не выпуская записи за пределы out.
-func extractZip(j *Job, zipPath, out string) error {
+func extractZip(j *Job, zipPath, out string) error { return extractZipPw(j, zipPath, out, "") }
+
+// extractZipPw - то же для архива, зашифрованного паролем pw (AES, как в 7-Zip).
+func extractZipPw(j *Job, zipPath, out, pw string) error {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return err
@@ -340,7 +344,7 @@ func extractZip(j *Job, zipPath, out string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 			return err
 		}
-		rc, err := f.Open()
+		rc, err := openZipEntry(f, pw)
 		if err != nil {
 			return err
 		}

@@ -72,6 +72,7 @@ func promptPassword(owner walk.Form, title, message string, confirm bool, okText
 const (
 	destInternet = "Через интернет"
 	destWait     = "Ждать получателя в сети"
+	destExch     = "Через обменники"
 )
 
 var proxyTypeNames = []string{"socks5", "socks4", "http"}
@@ -162,6 +163,14 @@ func guiMain(test bool) int {
 		saveExchCB      *walk.CheckBox
 		exchDirLE       *walk.LineEdit
 		shareToCB       *walk.ComboBox
+		exchOptsRow     *walk.Composite
+		updDest         func()
+		shellCB         *walk.CheckBox
+		updSrc          func()
+		exchExeCB       *walk.CheckBox
+		exchLinkBtn     *walk.PushButton
+		recvLinkRow     *walk.Composite
+		recvLinkLE      *walk.LineEdit
 		shareWatchCB    *walk.CheckBox
 		shareSendBtn    *walk.PushButton
 		exchAutoCB      *walk.CheckBox
@@ -366,6 +375,29 @@ func guiMain(test bool) int {
 		refreshList()
 	}
 
+	lastLink := ""
+	copyLink := func() {
+		if lastLink == "" {
+			return
+		}
+		_ = walk.Clipboard().SetText(lastLink)
+		_ = exchLinkBtn.SetText("Скопировано")
+		time.AfterFunc(1500*time.Millisecond, func() {
+			mw.Synchronize(func() { _ = exchLinkBtn.SetText("Скопировать ссылку") })
+		})
+	}
+	updDest = func() {
+		if exchOptsRow == nil || destCB == nil {
+			return
+		}
+		exchOptsRow.SetVisible(strings.TrimSpace(destCB.Text()) == destExch)
+	}
+	updSrc = func() {
+		if recvLinkRow == nil || srcCB == nil {
+			return
+		}
+		recvLinkRow.SetVisible(strings.TrimSpace(srcCB.Text()) == destExch)
+	}
 	var finish func(job *Job)
 	begin := func(job *Job, mode, out string, created bool) {
 		curJob, curMode, curOut, curCreated = job, mode, out, created
@@ -398,6 +430,11 @@ func guiMain(test bool) int {
 			tail = "\r\n=== Готово ==="
 		} else {
 			tail = fmt.Sprintf("\r\n=== Остановлено или ошибка (код %d) ===", code)
+		}
+		if curMode == "send" && code == 0 && job.Result() != "" {
+			lastLink = job.Result()
+			exchLinkBtn.SetEnabled(true)
+			tail += "\r\nСсылка готова: нажмите «Скопировать ссылку»."
 		}
 		if curMode == "recv" {
 			res := finalizeReceive(job, curOut, curCreated)
@@ -441,15 +478,17 @@ func guiMain(test bool) int {
 			return
 		}
 		pw := strings.TrimSpace(sendPw.Text())
-		if utf8.RuneCountInString(pw) < 3 {
-			warn("Пароль должен быть не короче 3 символов.")
+		target := strings.TrimSpace(destCB.Text())
+		isExch := target == destExch
+		if utf8.RuneCountInString(pw) < 3 && !(isExch && pw == "") {
+			warn("Пароль должен быть не короче 3 символов" + map[bool]string{true: " (или оставьте пустым: архив без пароля).", false: "."}[isExch])
 			return
 		}
 		text := sendText.Text()
 		if strings.TrimSpace(text) == "" {
 			text = ""
 		}
-		if text == "" && len(items) == 0 {
+		if text == "" && len(items) == 0 && !(isExch && exchExeCB.Checked()) {
 			warn("Введите текст и/или добавьте файлы или папки (можно перетащить их в окно).")
 			return
 		}
@@ -461,7 +500,19 @@ func guiMain(test bool) int {
 		}
 		cur := collect()
 		saveNow(cur)
-		target := strings.TrimSpace(destCB.Text())
+		if isExch {
+			lastLink = ""
+			exchLinkBtn.SetEnabled(false)
+			j, err := startExchSend(cur, pw, text, items, exchExeCB.Checked())
+			if err != nil {
+				warn(err.Error())
+				return
+			}
+			curLAN = false
+			setLog("Подготовка и загрузка на файлообменник...")
+			begin(j, "send", "", false)
+			return
+		}
 		if target == destWait {
 			if exch.Running() {
 				warn(errBusyRole.Error())
@@ -520,8 +571,10 @@ func guiMain(test bool) int {
 			return
 		}
 		pw := strings.TrimSpace(recvPw.Text())
-		if utf8.RuneCountInString(pw) < 3 {
-			warn("Пароль должен быть не короче 3 символов.")
+		source := strings.TrimSpace(srcCB.Text())
+		isExchR := source == destExch
+		if utf8.RuneCountInString(pw) < 3 && !(isExchR && pw == "") {
+			warn("Пароль должен быть не короче 3 символов" + map[bool]string{true: " (или оставьте пустым, если архив без пароля).", false: "."}[isExchR])
 			return
 		}
 		out := strings.TrimSpace(outLE.Text())
@@ -533,7 +586,21 @@ func guiMain(test bool) int {
 		cur.OutDir = out
 		saveNow(cur)
 		_ = recvText.SetText("")
-		source := strings.TrimSpace(srcCB.Text())
+		if isExchR {
+			if strings.TrimSpace(recvLinkLE.Text()) == "" {
+				warn("Вставьте ссылку на файл в поле «Ссылка».")
+				return
+			}
+			j, created, err := startExchRecv(cur, pw, recvLinkLE.Text(), out)
+			if err != nil {
+				warn(err.Error())
+				return
+			}
+			curLAN = false
+			setLog("Скачивание по ссылке...")
+			begin(j, "recv", out, created)
+			return
+		}
 		lan := source != "" && !strings.HasPrefix(source, destInternet)
 		lanAddr := ""
 		if lan {
@@ -603,8 +670,8 @@ func guiMain(test bool) int {
 			found := discoverPeers(1500*time.Millisecond, instanceID, "", broadcastTargets())
 			mw.Synchronize(func() {
 				peers = found
-				destItems := []string{destInternet, destWait}
-				srcItems := []string{destInternet}
+				destItems := []string{destInternet, destWait, destExch}
+				srcItems := []string{destInternet, destExch}
 				shareItems := []string{allDevices}
 				for _, p := range found {
 					if p.Role == roleRecv {
@@ -1029,10 +1096,20 @@ func guiMain(test bool) int {
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
 									Label{Text: "Куда:"},
-									ComboBox{AssignTo: &destCB, Editable: true, Model: []string{destInternet}, CurrentIndex: 0, MinSize: Size{Width: 180},
-										ToolTipText: "«Через интернет» - публичные relay.\r\n«Ждать получателя в сети» - это устройство открывает порт и ждёт, получатель находит его на вкладке «Получить» или вводит ваш IP.\r\nУстройство из списка - получатель в режиме обмена (вкладка «Обмен»). Можно вписать IP вручную, например 192.168.1.5."},
+									ComboBox{AssignTo: &destCB, Editable: true, Model: []string{destInternet, destWait, destExch}, CurrentIndex: 0, MinSize: Size{Width: 180},
+										OnCurrentIndexChanged: func() { updDest() }, OnTextChanged: func() { updDest() },
+										ToolTipText: "«Через интернет» - публичные relay croc (получатель с Crocau).\r\n«Через обменники» - файл выкладывается на анонимный файлообменник, вы получаете ссылку; получателю Crocau не нужен. Пароль в этом режиме необязателен: если он задан, файлы в архиве шифруются.\r\n«Ждать получателя в сети» - это устройство открывает порт и ждёт, получатель находит его на вкладке «Получить» или вводит ваш IP.\r\nУстройство из списка - получатель в режиме обмена (вкладка «Обмен»). Можно вписать IP вручную, например 192.168.1.5."},
 									PushButton{Text: "Найти в сети", OnClicked: refreshPeers},
 									HSpacer{},
+								},
+							},
+							Composite{
+								AssignTo: &exchOptsRow, Visible: false,
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									CheckBox{AssignTo: &exchExeCB, Text: "Приложить программу Crocau", ToolTipText: "Вторая ссылка - сама программа crocau.exe (в zip, если включено «Умное сжатие»; некоторые обменники не принимают голый .exe). Пригодится, если получателю нужна программа"},
+									HSpacer{},
+									PushButton{AssignTo: &exchLinkBtn, Text: "Скопировать ссылку", Enabled: false, OnClicked: func() { copyLink() }},
 								},
 							},
 							CheckBox{AssignTo: &compressCB, Text: "Умное сжатие", ToolTipText: smartCompressHint(), Checked: st.Compress},
@@ -1057,10 +1134,19 @@ func guiMain(test bool) int {
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
 									Label{Text: "Откуда:"},
-									ComboBox{AssignTo: &srcCB, Editable: true, Model: []string{destInternet}, CurrentIndex: 0, MinSize: Size{Width: 180},
-										ToolTipText: "«Через интернет» - публичные relay.\r\nИли отправитель в вашей сети (он выбрал «Ждать получателя в сети»): найдите его кнопкой «Найти в сети» или впишите его IP, например 192.168.1.5."},
+									ComboBox{AssignTo: &srcCB, Editable: true, Model: []string{destInternet, destExch}, CurrentIndex: 0, MinSize: Size{Width: 180},
+										OnCurrentIndexChanged: func() { updSrc() }, OnTextChanged: func() { updSrc() },
+										ToolTipText: "«Через интернет» - публичные relay.\r\n«Через обменники» - скачать по ссылке, которую вам прислали.\r\nИли отправитель в вашей сети (он выбрал «Ждать получателя в сети»): найдите его кнопкой «Найти в сети» или впишите его IP, например 192.168.1.5."},
 									PushButton{Text: "Найти в сети", OnClicked: refreshPeers},
 									HSpacer{},
+								},
+							},
+							Composite{
+								AssignTo: &recvLinkRow, Visible: false,
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									Label{Text: "Ссылка:"},
+									LineEdit{AssignTo: &recvLinkLE, ToolTipText: "Ссылка на файл, который вам прислали (можно вставить сообщение целиком: ссылка найдётся сама). Пароль ниже нужен, только если архив защищён"},
 								},
 							},
 							Label{Text: "Пароль (тот, что задал отправитель):"},
@@ -1225,6 +1311,20 @@ func guiMain(test bool) int {
 							LineEdit{AssignTo: &relayLE, Text: st.Relay},
 							Label{Text: "Пароль relay (пусто = по умолчанию):"},
 							LineEdit{AssignTo: &relayPassLE, Text: st.RelayPass},
+							CheckBox{AssignTo: &shellCB, Text: "Пункт «Отправить через Crocau» в меню Проводника (ПКМ)", Checked: shellInstalled(),
+								ToolTipText: "Появляется при щелчке правой кнопкой на файлах и папках. Права администратора не нужны. В Windows 11 пункт находится в «Показать дополнительные параметры». Если вы перенесли программу, снимите и поставьте галочку заново",
+								OnClicked: func() {
+									var err error
+									if shellCB.Checked() {
+										err = shellRegister()
+									} else {
+										err = shellUnregister()
+									}
+									if err != nil {
+										warn("Не удалось изменить меню Проводника: " + err.Error())
+										shellCB.SetChecked(shellInstalled())
+									}
+								}},
 							Label{Text: "Доп. ключи croc через пробел (например: --no-multi):"},
 							LineEdit{AssignTo: &extraLE, Text: st.Extra},
 							Label{Text: "Мастер-пароль (по желанию):"},
@@ -1331,6 +1431,24 @@ func guiMain(test bool) int {
 	exchStatus("Выключен")
 	if !test {
 		refreshPeers() // сразу заполнить список устройств
+		listenIfFree()
+		if shellListener != nil {
+			serveShell(shellListener, func(ps []string) {
+				mw.Synchronize(func() {
+					addPaths(existingPaths(ps))
+					_ = tabs.SetCurrentIndex(0)
+					if trayHidden {
+						restoreFromTray()
+					} else {
+						win.ShowWindow(mw.Handle(), win.SW_RESTORE)
+						win.SetForegroundWindow(mw.Handle())
+					}
+				})
+			})
+		}
+		if len(shellInitPaths) > 0 {
+			addPaths(existingPaths(shellInitPaths))
+		}
 		if st.ExchAuto && st.SaveExchPw && st.ExchPw != "" && !settingsReadOnly {
 			mw.Synchronize(startExchange)
 		}
@@ -1346,6 +1464,9 @@ func guiMain(test bool) int {
 	mw.DropFiles().Attach(func(files []string) { addPaths(files) })
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
 		shareCancelOnce.Do(func() { close(shareCancel) })
+		if shellListener != nil {
+			_ = shellListener.Close()
+		}
 		shareW.Stop()
 		exch.Stop()
 		if curHost != nil {

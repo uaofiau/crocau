@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -117,6 +118,9 @@ type Job struct {
 	work     string
 	secret   string
 	preCount int
+	ctx      context.Context
+	cancel   context.CancelFunc
+	result   string          // итог для пользователя (ссылки обменников)
 	pre      map[string]bool // имена в папке приёма до начала (для режима обмена)
 }
 
@@ -130,6 +134,8 @@ type JobSpec struct {
 	ProbeRelay string   // relay для быстрой проверки маршрутов (если маршрутов больше одного)
 	Prep       func(j *Job) error
 	Post       func(j *Job) error
+	// Do - собственная работа вместо croc (загрузка/скачивание по HTTP): получает маршруты, возвращает код выхода.
+	Do func(j *Job, routes []Route) int
 }
 
 func newWork() (string, error) { return os.MkdirTemp("", "crocau-") }
@@ -227,6 +233,7 @@ func isConnectError(text string) bool {
 // startJob запускает задание в фоне и сразу возвращает Job.
 func startJob(spec JobSpec) *Job {
 	j := &Job{done: make(chan struct{}), work: spec.Work, secret: spec.Secret}
+	j.ctx, j.cancel = context.WithCancel(context.Background())
 	go func() {
 		code := j.run(spec)
 		j.mu.Lock()
@@ -262,6 +269,20 @@ func (j *Job) run(spec JobSpec) int {
 			}
 			return -1
 		}
+	}
+	if spec.Do != nil {
+		routes := spec.Routes
+		if len(routes) == 0 {
+			routes = []Route{{}}
+		}
+		code := spec.Do(j, routes)
+		if code == 0 && spec.Post != nil {
+			if err := spec.Post(j); err != nil {
+				j.addNote("Ошибка: " + err.Error())
+				return 2
+			}
+		}
+		return code
 	}
 	relays := spec.Relays
 	if len(relays) == 0 {
@@ -371,7 +392,11 @@ func (j *Job) Kill() {
 	j.mu.Lock()
 	j.killed = true
 	cmd := j.cmd
+	cancel := j.cancel
 	j.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
 	}
@@ -390,6 +415,19 @@ func (j *Job) Wait(d time.Duration) bool {
 		}
 		return false
 	}
+}
+
+func (j *Job) setResult(s string) {
+	j.mu.Lock()
+	j.result = s
+	j.mu.Unlock()
+}
+
+// Result - итог задания (например, ссылки на обменники для копирования).
+func (j *Job) Result() string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.result
 }
 
 func (j *Job) ExitCode() int {

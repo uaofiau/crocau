@@ -3,12 +3,17 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -908,6 +913,205 @@ func selfTest() int {
 				fails++
 				testLogf("PROXY CHECK (probe): FAIL")
 			}
+		}
+	}
+
+	// 4b) обменники: отправка и приём по ссылке через локальный сервер-имитатор (без настоящих сервисов)
+	{
+		var mu sync.Mutex
+		store := map[string][]byte{}
+		mux := http.NewServeMux()
+		var tsURL string
+		mux.HandleFunc("/up", func(w http.ResponseWriter, r *http.Request) {
+			if err := r.ParseMultipartForm(64 << 20); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			f, hdr, err := r.FormFile("fileToUpload")
+			if err != nil {
+				http.Error(w, "no file", 400)
+				return
+			}
+			b, _ := io.ReadAll(f)
+			id := randHex(4)
+			mu.Lock()
+			store["/f/"+id+"/"+hdr.Filename] = b
+			mu.Unlock()
+			fmt.Fprint(w, tsURL+"/f/"+id+"/"+url.PathEscape(hdr.Filename)+"\n")
+		})
+		mux.HandleFunc("/f/", func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			b, ok := store[r.URL.Path]
+			mu.Unlock()
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(b)
+		})
+		ts := httptest.NewServer(mux)
+		tsURL = ts.URL
+		saved := xProviders
+		xProviders = []xProvider{{name: "mock", max: 1 << 30, keep: "тест", upload: func(ctx context.Context, c *http.Client, file, name string, size int64, prog func(int64)) (string, error) {
+			body, err := postMultipart(ctx, c, ts.URL+"/up", map[string]string{"reqtype": "fileupload"}, "fileToUpload", file, name, size, prog)
+			if err != nil {
+				return "", err
+			}
+			return uploadTextURL(body)
+		}}}
+		cfg := Settings{ProxyMode: modeDirect, ExchName: "Тест/Хост"}
+		xsrc, _ := newWork()
+		xfile := filepath.Join(xsrc, "док ф.bin")
+		xdata := bytes.Repeat([]byte("exchanger-data-"), 40000)
+		_ = os.WriteFile(xfile, xdata, 0644)
+		xdir := filepath.Join(xsrc, "папка Х", "под")
+		_ = os.MkdirAll(xdir, 0755)
+		_ = os.WriteFile(filepath.Join(xdir, "a.txt"), []byte("hello"), 0644)
+		runRecv := func(pw, link string) (*Job, string, RecvResult, bool) {
+			dst, _ := newWork()
+			rj, created, err := startExchRecv(cfg, pw, link, dst)
+			if err != nil {
+				return nil, dst, RecvResult{}, false
+			}
+			ok := rj.Wait(60*time.Second) && rj.ExitCode() == 0
+			return rj, dst, finalizeReceive(rj, dst, created), ok
+		}
+		runSend := func(c Settings, pw, text string, items []string, exe bool) (*Job, bool) {
+			sj, err := startExchSend(c, pw, text, items, exe)
+			if err != nil {
+				return nil, false
+			}
+			return sj, sj.Wait(90*time.Second) && sj.ExitCode() == 0
+		}
+		xok := true
+		xfail := func(what string, sj, rj *Job) {
+			xok = false
+			testLogf("EXCHANGERS: FAIL %s", what)
+			if sj != nil {
+				testLogf("  send: %s", sj.Log())
+			}
+			if rj != nil {
+				testLogf("  recv: %s", rj.Log())
+			}
+		}
+		// а) с паролем: текст + файл + папка
+		sj, ok1 := runSend(cfg, "парoль1", "текст для обменника", []string{xfile, filepath.Join(xsrc, "папка Х")}, false)
+		link := ""
+		if sj != nil {
+			link = sj.Result()
+		}
+		rj, dst, res, ok2 := runRecv("парoль1", link)
+		if !(ok1 && ok2 && res.Text == "текст для обменника" && fileEquals(filepath.Join(dst, "док ф.bin"), xdata) &&
+			fileEquals(filepath.Join(dst, "папка Х", "под", "a.txt"), []byte("hello")) && !fileExists(filepath.Join(dst, fromFileName))) {
+			xfail("password archive round trip", sj, rj)
+		}
+		// б) неверный пароль и отсутствие пароля: ничего не извлекается
+		rj2, dst2, _, ok3 := runRecv("не-тот", link)
+		rj3, dst3, _, ok4 := runRecv("", link)
+		if ok3 || ok4 || fileExists(filepath.Join(dst2, "док ф.bin")) || fileExists(filepath.Join(dst3, "док ф.bin")) ||
+			!strings.Contains(rj2.Log(), "неверный пароль") || !strings.Contains(rj3.Log(), "защищён паролем") {
+			xfail("wrong/missing password must be rejected", nil, rj2)
+			testLogf("  nopw: %s", rj3.Log())
+		}
+		// в) без пароля, со сжатием
+		cz := cfg
+		cz.Compress = true
+		sj4, ok5 := runSend(cz, "", "", []string{xfile}, false)
+		rj4, dst4, _, ok6 := runRecv("", sj4.Result())
+		if !(ok5 && ok6 && fileEquals(filepath.Join(dst4, "док ф.bin"), xdata)) {
+			xfail("compressed archive without password", sj4, rj4)
+		}
+		// г) один файл без пароля и без сжатия уходит как есть, под своим именем
+		sj5, ok7 := runSend(cfg, "", "", []string{xfile}, false)
+		rj5, dst5, _, ok8 := runRecv("", sj5.Result())
+		if !(ok7 && ok8 && fileEquals(filepath.Join(dst5, "док ф.bin"), xdata) && strings.HasSuffix(sj5.Result(), "/"+url.PathEscape("док ф.bin"))) {
+			xfail("single file as is", sj5, rj5)
+		}
+		// д) отправка самой программы в zip: вторая ссылка скачивается и содержит crocau.exe нужного размера
+		sj6, ok9 := runSend(cz, "", "", []string{xfile}, true)
+		lines := strings.Split(strings.TrimSpace(sj6.Result()), "\r\n")
+		exeOK := false
+		if ok9 && len(lines) == 2 {
+			exeLink := strings.TrimSpace(lines[1][strings.Index(lines[1], ": ")+2:])
+			pdir, _ := newWork()
+			cj, err := startExchRecv(cfg, "", exeLink, pdir)
+			if err == nil {
+				cj.Wait(60 * time.Second)
+			}
+			selfExe, _ := os.Executable()
+			fi1, _ := os.Stat(selfExe)
+			fi2, _ := os.Stat(filepath.Join(pdir, "crocau.zip"))
+			if fi1 != nil && fi2 != nil && fi2.Size() < fi1.Size() {
+				if zr, err := zip.OpenReader(filepath.Join(pdir, "crocau.zip")); err == nil {
+					if len(zr.File) == 1 && zr.File[0].Name == "crocau.exe" && zr.File[0].UncompressedSize64 == uint64(fi1.Size()) {
+						exeOK = true
+					}
+					zr.Close()
+				}
+			}
+		}
+		if !exeOK {
+			xfail("program zip upload", sj6, nil)
+		}
+		// е) ссылка в сообщении с текстом и tmpfiles-страница нормализуются
+		l1, e1 := normalizeLink("Файлы: https://example.org/a/b.zip  (litterbox)")
+		l2, _ := normalizeLink("https://tmpfiles.org/123/x.zip")
+		if e1 != nil || l1 != "https://example.org/a/b.zip" || l2 != "https://tmpfiles.org/dl/123/x.zip" {
+			xfail("link normalization", nil, nil)
+		}
+		xProviders = saved
+		ts.Close()
+		if xok {
+			testLogf("EXCHANGERS (mock server: AES password archive, wrong/missing password, compressed, single file as is, program zip, links): OK")
+		} else {
+			fails++
+		}
+	}
+
+	// 4c) меню Проводника и пересылка путей в уже открытое окно
+	{
+		okReg, msg := shellSelfTest()
+		ln, lerr := net.Listen("tcp", "127.0.0.1:0")
+		got := make(chan []string, 4)
+		if lerr == nil {
+			serveShell(ln, func(ps []string) { got <- ps })
+			ferr1 := forwardPaths(ln.Addr().String(), []string{`C:\папка с пробелом\файл ф.txt`})
+			ferr2 := forwardPaths(ln.Addr().String(), []string{`D:\x`, `E:\y z`})
+			var all []string
+			for i := 0; i < 2; i++ {
+				select {
+				case ps := <-got:
+					all = append(all, ps...)
+				case <-time.After(3 * time.Second):
+				}
+			}
+			ln.Close()
+			okFwd := ferr1 == nil && ferr2 == nil && len(all) == 3 && all[0] == `C:\папка с пробелом\файл ф.txt` && all[2] == `E:\y z`
+			// второй процесс при занятом порте пересылает и завершается, первый становится окном
+			ln2, _ := net.Listen("tcp", "127.0.0.1:0")
+			addr2 := ln2.Addr().String()
+			ln2.Close()
+			c1 := shellSendAt(addr2, []string{"p1"})
+			own := shellListener
+			shellListener = nil
+			serveShell(own, func(ps []string) { got <- ps })
+			c2 := shellSendAt(addr2, []string{"p2"})
+			var p2 []string
+			select {
+			case p2 = <-got:
+			case <-time.After(3 * time.Second):
+			}
+			own.Close()
+			shellInitPaths = nil
+			if okReg && okFwd && c1 == -1 && c2 == 0 && len(p2) == 1 && p2[0] == "p2" {
+				testLogf("EXPLORER MENU (register/detect/unregister, path forwarding, single window for many files): OK")
+			} else {
+				fails++
+				testLogf("EXPLORER MENU: FAIL reg=%v(%s) fwd=%v c1=%d c2=%d p2=%v", okReg, msg, okFwd, c1, c2, p2)
+			}
+		} else {
+			fails++
+			testLogf("EXPLORER MENU: FAIL listen %v", lerr)
 		}
 	}
 
