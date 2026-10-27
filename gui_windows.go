@@ -1107,7 +1107,7 @@ func guiMain(test bool) int {
 								AssignTo: &exchOptsRow, Visible: false,
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
-									CheckBox{AssignTo: &exchExeCB, Text: "Приложить программу Crocau", ToolTipText: "Вторая ссылка - сама программа crocau.exe (в zip, если включено «Умное сжатие»; некоторые обменники не принимают голый .exe). Пригодится, если получателю нужна программа"},
+									CheckBox{AssignTo: &exchExeCB, Text: "Приложить программу Crocau", ToolTipText: "Программа crocau.exe кладётся в тот же архив, что и файлы (одна ссылка). Если файлов и текста нет - уходит только программа. Архив открывается Проводником Windows без архиваторов; пароль для него - только латиницей и цифрами (традиционное шифрование, слабее AES)"},
 									HSpacer{},
 									PushButton{AssignTo: &exchLinkBtn, Text: "Скопировать ссылку", Enabled: false, OnClicked: func() { copyLink() }},
 								},
@@ -1311,8 +1311,8 @@ func guiMain(test bool) int {
 							LineEdit{AssignTo: &relayLE, Text: st.Relay},
 							Label{Text: "Пароль relay (пусто = по умолчанию):"},
 							LineEdit{AssignTo: &relayPassLE, Text: st.RelayPass},
-							CheckBox{AssignTo: &shellCB, Text: "Пункт «Отправить через Crocau» в меню Проводника (ПКМ)", Checked: shellInstalled(),
-								ToolTipText: "Появляется при щелчке правой кнопкой на файлах и папках. Права администратора не нужны. В Windows 11 пункт находится в «Показать дополнительные параметры». Если вы перенесли программу, снимите и поставьте галочку заново",
+							CheckBox{AssignTo: &shellCB, Text: "Пункт Crocau в меню Проводника «Отправить» (ПКМ → Отправить → Crocau)", Checked: shellInstalled(),
+								ToolTipText: "Ярлык в папке «Отправить» (shell:sendto): общее контекстное меню не засоряется. Права администратора не нужны. В Windows 11 «Отправить» находится в «Показать дополнительные параметры». Если вы перенесли программу, снимите и поставьте галочку заново",
 								OnClicked: func() {
 									var err error
 									if shellCB.Checked() {
@@ -1431,6 +1431,7 @@ func guiMain(test bool) int {
 	exchStatus("Выключен")
 	if !test {
 		refreshPeers() // сразу заполнить список устройств
+		shellCleanupLegacy()
 		listenIfFree()
 		if shellListener != nil {
 			serveShell(shellListener, func(ps []string) {

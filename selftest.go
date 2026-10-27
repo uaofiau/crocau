@@ -1027,31 +1027,58 @@ func selfTest() int {
 		if !(ok7 && ok8 && fileEquals(filepath.Join(dst5, "док ф.bin"), xdata) && strings.HasSuffix(sj5.Result(), "/"+url.PathEscape("док ф.bin"))) {
 			xfail("single file as is", sj5, rj5)
 		}
-		// д) отправка самой программы в zip: вторая ссылка скачивается и содержит crocau.exe нужного размера
+		// д) программа в том же архиве, что и файлы (одна ссылка); с паролем - традиционное шифрование для Проводника
+		selfExe, _ := os.Executable()
+		fiExe, _ := os.Stat(selfExe)
+		exeName := filepath.Base(selfExe)
 		sj6, ok9 := runSend(cz, "", "", []string{xfile}, true)
-		lines := strings.Split(strings.TrimSpace(sj6.Result()), "\r\n")
-		exeOK := false
-		if ok9 && len(lines) == 2 {
-			exeLink := strings.TrimSpace(lines[1][strings.Index(lines[1], ": ")+2:])
-			pdir, _ := newWork()
-			cj, _, err := startExchRecv(cfg, "", exeLink, pdir)
-			if err == nil {
-				cj.Wait(60 * time.Second)
-			}
-			selfExe, _ := os.Executable()
-			fi1, _ := os.Stat(selfExe)
-			fi2, _ := os.Stat(filepath.Join(pdir, "crocau.zip"))
-			if fi1 != nil && fi2 != nil && fi2.Size() < fi1.Size() {
-				if zr, err := zip.OpenReader(filepath.Join(pdir, "crocau.zip")); err == nil {
-					if len(zr.File) == 1 && zr.File[0].Name == "crocau.exe" && zr.File[0].UncompressedSize64 == uint64(fi1.Size()) {
-						exeOK = true
+		rj6, dst6, _, ok10 := runRecv("", sj6.Result())
+		exeOK := ok9 && ok10 && !strings.Contains(sj6.Result(), "\n") && fiExe != nil &&
+			fileEquals(filepath.Join(dst6, "док ф.bin"), xdata) && fileExists(filepath.Join(dst6, exeName))
+		if fi, err := os.Stat(filepath.Join(dst6, exeName)); err != nil || fiExe == nil || fi.Size() != fiExe.Size() {
+			exeOK = false
+		}
+		sj7, ok11 := runSend(cz, "Pass123", "", []string{xfile}, true)
+		_, dst7, _, ok12 := runRecv("Pass123", sj7.Result())
+		rj8, dst8, _, ok13 := runRecv("wrong1", sj7.Result())
+		if ok9 && ok10 && exeOK && ok11 && ok12 && fileEquals(filepath.Join(dst7, "док ф.bin"), xdata) && fileExists(filepath.Join(dst7, exeName)) &&
+			!ok13 && !fileExists(filepath.Join(dst8, "док ф.bin")) && strings.Contains(rj8.Log(), "неверный пароль") {
+			// архив с программой читается стандартным zip без AES-расширений (как Проводник)
+			zdir, _ := newWork()
+			zp, _ := downloadLink(context.Background(), Route{}, strings.TrimSpace(sj7.Result()), zdir, func(int64, int64) {})
+			stdOK := false
+			if zr, err := zip.OpenReader(zp); err == nil {
+				stdOK = len(zr.File) >= 2
+				for _, f := range zr.File {
+					if f.Method == 99 || f.Flags&1 == 0 {
+						stdOK = false
 					}
-					zr.Close()
 				}
+				zr.Close()
+			}
+			if !stdOK {
+				exeOK = false
+			}
+		} else {
+			exeOK = false
+		}
+		// только программа (без файлов и текста): одна ссылка на zip с exe
+		sj9, ok14 := runSend(cz, "", "", nil, true)
+		_, dst9, _, ok15 := runRecv("", sj9.Result())
+		zpOnly := ""
+		if es, _ := os.ReadDir(dst9); len(es) == 1 {
+			zpOnly = es[0].Name()
+		}
+		onlyOK := false
+		if ok14 && ok15 && strings.HasSuffix(zpOnly, ".zip") {
+			if zr, err := zip.OpenReader(filepath.Join(dst9, zpOnly)); err == nil {
+				onlyOK = len(zr.File) == 1 && zr.File[0].Name == exeName && zr.File[0].UncompressedSize64 == uint64(fiExe.Size())
+				zr.Close()
 			}
 		}
-		if !exeOK {
-			xfail("program zip upload", sj6, nil)
+		if !exeOK || !onlyOK {
+			xfail("program inside the archive", sj6, rj6)
+			testLogf("  exeOK=%v onlyOK=%v ok9=%v ok10=%v ok11=%v ok12=%v ok13=%v ok14=%v ok15=%v only=%q", exeOK, onlyOK, ok9, ok10, ok11, ok12, ok13, ok14, ok15, zpOnly)
 		}
 		// е) ссылка в сообщении с текстом и tmpfiles-страница нормализуются
 		l1, e1 := normalizeLink("Файлы: https://example.org/a/b.zip  (litterbox)")
@@ -1062,7 +1089,7 @@ func selfTest() int {
 		xProviders = saved
 		ts.Close()
 		if xok {
-			testLogf("EXCHANGERS (mock server: AES password archive, wrong/missing password, compressed, single file as is, program zip, links): OK")
+			testLogf("EXCHANGERS (mock server: AES password archive, wrong/missing password, compressed, single file as is, program in the same archive with classic password, links): OK")
 		} else {
 			fails++
 		}

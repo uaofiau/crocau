@@ -300,8 +300,11 @@ func openZipEntry(f *zip.File, pw string) (io.ReadCloser, error) {
 		return f.Open()
 	}
 	method, ok := aesInfo(f.Extra)
-	if !ok || f.Method != aesMethod {
-		return nil, errors.New("неподдерживаемое шифрование архива (нужен AES, как в 7-Zip)")
+	if f.Method != aesMethod {
+		return openZipClassic(f, pw) // традиционное шифрование (Проводник Windows)
+	}
+	if !ok {
+		return nil, errors.New("неподдерживаемое шифрование архива")
 	}
 	if pw == "" {
 		return nil, errZipPassword

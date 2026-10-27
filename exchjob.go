@@ -70,6 +70,9 @@ func startExchSend(s Settings, pw, text string, items []string, withExe bool) (*
 	if pw != "" && utf8.RuneCountInString(pw) < 3 {
 		return nil, errors.New("пароль архива должен быть не короче 3 символов (или оставьте поле пустым - без пароля)")
 	}
+	if withExe && pw != "" && !isASCII(pw) {
+		return nil, errors.New("для архива с программой пароль только из латинских букв и цифр (такой архив открывает Проводник Windows)")
+	}
 	routes, err := routesFor(s)
 	if err != nil {
 		return nil, err
@@ -82,42 +85,63 @@ func startExchSend(s Settings, pw, text string, items []string, withExe bool) (*
 	var files []upItem
 	spec := JobSpec{Work: work, Routes: routes}
 	spec.Prep = func(j *Job) error {
-		if text != "" || len(items) > 0 {
-			if text == "" && len(items) == 1 && pw == "" && !s.Compress && isRegularFile(items[0]) {
-				files = append(files, upItem{items[0], filepath.Base(items[0]), "Файл"})
-			} else {
-				j.setStatus("Архивирование...")
-				p, err := buildArchive(j, work, text, from, items)
-				if err != nil {
-					return err
-				}
-				if pw != "" {
-					j.setStatus("Шифрование архива...")
-					enc := p + ".enc"
-					if err := encryptZip(p, enc, pw, "crocau"); err != nil {
-						return err
-					}
-					_ = os.Remove(p)
-					p = enc
-				}
-				files = append(files, upItem{p, "crocau-" + randHex(4) + ".zip", "Файлы"})
-			}
-		}
+		var exe string
 		if withExe {
-			exe, err := os.Executable()
+			e, err := os.Executable()
 			if err != nil {
 				return err
 			}
+			exe = e
+		}
+		onlyProgram := withExe && text == "" && len(items) == 0
+		switch {
+		case onlyProgram && pw == "":
+			// только программа: в zip (открывается Проводником без архиваторов) или как есть
 			if s.Compress {
 				zp := filepath.Join(work, "crocau-program.zip")
 				j.setStatus("Архивирование программы...")
-				if err := zipOne(exe, "crocau.exe", zp); err != nil {
+				if err := zipOne(exe, filepath.Base(exe), zp); err != nil {
 					return err
 				}
 				files = append(files, upItem{zp, "crocau.zip", "Программа Crocau"})
 			} else {
 				files = append(files, upItem{exe, "crocau.exe", "Программа Crocau"})
 			}
+		case text == "" && len(items) == 1 && !withExe && pw == "" && !s.Compress && isRegularFile(items[0]):
+			files = append(files, upItem{items[0], filepath.Base(items[0]), "Файл"})
+		default:
+			all := append([]string{}, items...)
+			if withExe {
+				all = append(all, exe) // программа лежит в том же архиве, что и файлы
+			}
+			j.setStatus("Архивирование...")
+			var p string
+			var err error
+			if onlyProgram {
+				p = filepath.Join(work, "crocau-program.zip")
+				err = zipOne(exe, filepath.Base(exe), p)
+			} else {
+				p, err = buildArchive(j, work, text, from, all)
+			}
+			if err != nil {
+				return err
+			}
+			if pw != "" {
+				j.setStatus("Шифрование архива...")
+				enc := p + ".enc"
+				if withExe {
+					// архив с программой должен открываться Проводником Windows: традиционное шифрование (слабее AES)
+					err = encryptZipClassic(p, enc, pw, "crocau")
+				} else {
+					err = encryptZip(p, enc, pw, "crocau")
+				}
+				if err != nil {
+					return err
+				}
+				_ = os.Remove(p)
+				p = enc
+			}
+			files = append(files, upItem{p, "crocau-" + randHex(4) + ".zip", "Файлы"})
 		}
 		j.setStatus("")
 		return nil
@@ -145,7 +169,11 @@ func startExchSend(s Settings, pw, text string, items []string, withExe bool) (*
 			lines = append(lines, it.label+": "+link)
 		}
 		if pw != "" {
-			j.addNote("Файлы в архиве зашифрованы паролем. Сообщите его получателю отдельно. Открыть архив можно в 7-Zip или WinRAR (Проводник Windows с такими архивами не работает).")
+			if withExe {
+				j.addNote("Архив защищён паролем (открывается Проводником Windows без архиваторов). Сообщите пароль получателю отдельно.")
+			} else {
+				j.addNote("Файлы в архиве зашифрованы паролем AES-256. Сообщите его получателю отдельно. Открыть архив можно в 7-Zip или WinRAR (Проводник Windows с такими архивами не работает).")
+			}
 		}
 		if len(lines) == 1 {
 			lines[0] = lines[0][strings.Index(lines[0], ": ")+2:]
