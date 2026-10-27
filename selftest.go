@@ -1155,6 +1155,34 @@ func netTest() int {
 			testLogf("probe %s: OK %d ms", r, probes[0][k].RTT.Milliseconds())
 		}
 	}
+	// файлообменники: загрузка небольшого файла и скачивание обратно
+	{
+		tdir, _ := newWork()
+		tf := filepath.Join(tdir, "crocau-nettest.txt")
+		payload := []byte("crocau exchanger test " + randHex(4))
+		_ = os.WriteFile(tf, payload, 0644)
+		saved := xProviders
+		for _, pr := range saved {
+			xProviders = []xProvider{pr}
+			ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+			link, _, err := uploadChain(ctx, Route{}, tf, "crocau-nettest.txt", func(int64, int64) {}, func(string) {})
+			if err != nil {
+				cancel()
+				testLogf("EXCHANGER %s: FAIL upload: %v", pr.name, err)
+				continue
+			}
+			p, derr := downloadLink(ctx, Route{}, link, filepath.Join(tdir, "dl-"+pr.name), func(int64, int64) {})
+			cancel()
+			if derr != nil {
+				testLogf("EXCHANGER %s: FAIL download %s: %v", pr.name, link, derr)
+			} else if !fileEquals(p, payload) {
+				testLogf("EXCHANGER %s: FAIL content differs (%s)", pr.name, link)
+			} else {
+				testLogf("EXCHANGER %s: OK %s", pr.name, link)
+			}
+		}
+		xProviders = saved
+	}
 	text := "проверка публичных relay"
 	dst, _ := newWork()
 	pw := "net" + randomPassword()
