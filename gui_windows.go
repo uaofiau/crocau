@@ -163,6 +163,8 @@ func guiMain(test bool) int {
 		saveExchCB      *walk.CheckBox
 		exchDirLE       *walk.LineEdit
 		shareToCB       *walk.ComboBox
+		scanLbl         *walk.Label
+		scanLbl2        *walk.Label
 		exchOptsRow     *walk.Composite
 		updDest         func()
 		shellCB         *walk.CheckBox
@@ -665,9 +667,24 @@ func guiMain(test bool) int {
 	}
 
 	// ---------- локальная сеть и режим обмена ----------
-	refreshPeers := func() {
+	setScan := func(t string) {
+		if scanLbl != nil {
+			_ = scanLbl.SetText(t)
+		}
+		if scanLbl2 != nil {
+			_ = scanLbl2.SetText(t)
+		}
+	}
+	scanPeers := func(verbose bool) {
+		plan := planScan()
+		if verbose {
+			setScan(fmt.Sprintf("Поиск в сети (UDP 29008): проверяю адресов: %d...", len(plan.Targets)))
+			if curJob == nil {
+				setLog("Поиск устройств в сети...\r\n" + strings.Join(plan.Lines, "\r\n"))
+			}
+		}
 		go func() {
-			found := discoverPeers(1500*time.Millisecond, instanceID, "", broadcastTargets())
+			found := discoverPeers(2*time.Second, instanceID, "", plan.Targets)
 			mw.Synchronize(func() {
 				peers = found
 				destItems := []string{destInternet, destWait, destExch}
@@ -693,9 +710,38 @@ func guiMain(test bool) int {
 						_ = c.cb.SetCurrentIndex(0)
 					}
 				}
+				if !verbose {
+					return
+				}
+				var names []string
+				for _, p := range found {
+					role := "принимает"
+					if p.Role == roleSend {
+						role = "ждёт получателя"
+					}
+					names = append(names, p.Label()+" - "+role)
+				}
+				if len(found) > 0 {
+					setScan(fmt.Sprintf("Найдено устройств: %d (выберите в списке «Куда»/«Откуда»)", len(found)))
+				} else {
+					setScan("Устройств не найдено (подробности - в окне «Ход операции»)")
+				}
+				if curJob == nil {
+					res := "Результат: устройств не найдено.\r\nПроверьте:\r\n" +
+						"1) на другом устройстве включён режим «Обмен» (чтобы отправить ему) или выбрано «Ждать получателя в сети» (чтобы забрать у него);\r\n" +
+						"2) на нём открыты порты брандмауэра: UDP 29008 и TCP 29009-29013 (кнопка «Открыть порты» на вкладке «Обмен» ТОГО устройства);\r\n" +
+						"3) оба устройства в одной подсети (для виртуальной машины - сетевой адаптер Bridged либо та же сеть NAT/Host-only);\r\n" +
+						"4) на этом компьютере тоже разрешён crocau.exe (при первом запуске Windows спрашивает про брандмауэр).\r\n" +
+						"Можно вписать IP устройства вручную в поле «Куда»/«Откуда»."
+					if len(found) > 0 {
+						res = "Результат: найдено устройств: " + itoa(len(found)) + "\r\n" + strings.Join(names, "\r\n")
+					}
+					setLog("Поиск устройств в сети (UDP 29008)\r\n" + strings.Join(plan.Lines, "\r\n") + "\r\nВсего адресов: " + itoa(len(plan.Targets)) + "\r\n\r\n" + res)
+				}
 			})
 		}()
 	}
+	refreshPeers := func() { scanPeers(true) }
 	exchStatus := func(full string) {
 		short := full
 		if r := []rune(short); len(r) > 64 {
@@ -1103,6 +1149,7 @@ func guiMain(test bool) int {
 									HSpacer{},
 								},
 							},
+							Label{AssignTo: &scanLbl, Text: ""},
 							Composite{
 								AssignTo: &exchOptsRow, Visible: false,
 								Layout: HBox{MarginsZero: true},
@@ -1141,6 +1188,7 @@ func guiMain(test bool) int {
 									HSpacer{},
 								},
 							},
+							Label{AssignTo: &scanLbl2, Text: ""},
 							Composite{
 								AssignTo: &recvLinkRow, Visible: false,
 								Layout: HBox{MarginsZero: true},
@@ -1430,7 +1478,7 @@ func guiMain(test bool) int {
 	}
 	exchStatus("Выключен")
 	if !test {
-		refreshPeers() // сразу заполнить список устройств
+		scanPeers(false) // сразу заполнить список устройств
 		shellCleanupLegacy()
 		listenIfFree()
 		if shellListener != nil {

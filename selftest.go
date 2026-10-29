@@ -1095,6 +1095,34 @@ func selfTest() int {
 		}
 	}
 
+	// 4d) план поиска в сети: перечень адресов подсети
+	{
+		h24 := hostsIn(net.ParseIP("192.168.1.5"), net.CIDRMask(24, 32))
+		h16 := hostsIn(net.ParseIP("10.1.7.9"), net.CIDRMask(16, 32))
+		h22 := hostsIn(net.ParseIP("10.1.5.9"), net.CIDRMask(22, 32))
+		h30 := hostsIn(net.ParseIP("10.0.0.1"), net.CIDRMask(30, 32))
+		plan := planScan()
+		okPlan := len(h24) == 254 && h24[0].String() == "192.168.1.1" && h24[253].String() == "192.168.1.254" &&
+			len(h16) == 254 && h16[0].String() == "10.1.7.1" && len(h22) == 1022 && len(h30) == 2 && len(plan.Targets) >= 1
+		for _, tg := range plan.Targets {
+			if !strings.HasSuffix(tg, ":"+itoa(lanDiscPort)) {
+				okPlan = false
+			}
+		}
+		for _, ip := range localIPv4s() {
+			for _, tg := range plan.Targets {
+				if tg == net.JoinHostPort(ip, itoa(lanDiscPort)) {
+					okPlan = false // себя не опрашиваем
+				}
+			}
+		}
+		if okPlan {
+			testLogf("LAN SCAN PLAN (unicast sweep of subnet, /16 narrowed to /24, own addresses skipped): OK %d targets", len(plan.Targets))
+		} else {
+			fails++
+			testLogf("LAN SCAN PLAN: FAIL %d/%d/%d/%d targets=%d", len(h24), len(h16), len(h22), len(h30), len(plan.Targets))
+		}
+	}
 	// 4c) меню Проводника и пересылка путей в уже открытое окно
 	{
 		okReg, msg := shellSelfTest()

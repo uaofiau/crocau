@@ -237,7 +237,7 @@ func resolveShareTargets(target string, known []Peer, selfID string) []string {
 	t := strings.TrimSpace(target)
 	var out []string
 	if t == "" || t == allDevices {
-		for _, p := range discoverPeers(1500*time.Millisecond, selfID, roleRecv, broadcastTargets()) {
+		for _, p := range discoverPeers(2*time.Second, selfID, roleRecv, planScan().Targets) {
 			out = append(out, p.Addr())
 		}
 		return out

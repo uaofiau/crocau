@@ -225,3 +225,110 @@ func parseLANAddr(text string) (string, bool) {
 	}
 	return net.JoinHostPort(m[1], port), true
 }
+
+// ScanPlan - что именно проверяется при поиске устройств: широковещательные и одиночные адреса подсетей.
+// Одиночные (unicast) запросы нужны, потому что ответ на широковещательный запрос брандмауэр Windows часто отбрасывает
+// (ответ приходит не с того адреса, на который был отправлен запрос), а ответ на адресный запрос пропускает.
+type ScanPlan struct {
+	Targets []string // host:port для отправки запроса
+	Lines   []string // человекочитаемое описание (интерфейсы и диапазоны)
+	Hosts   int      // число проверяемых одиночных адресов
+}
+
+// hostsIn перечисляет адреса подсети ip/mask (без адреса сети и широковещательного). Широкие сети (шире /22) сужаются
+// до /24 вокруг адреса ip, чтобы не рассылать тысячи пакетов.
+func hostsIn(ip net.IP, mask net.IPMask) []net.IP {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil
+	}
+	if len(mask) == 16 {
+		mask = mask[12:]
+	}
+	ones, bits := mask.Size()
+	if bits != 32 || ones >= 31 {
+		return nil
+	}
+	if ones < 22 {
+		ones = 24
+		mask = net.CIDRMask(24, 32)
+	}
+	base := ip4.Mask(mask)
+	count := 1 << uint(32-ones)
+	var out []net.IP
+	for i := 1; i < count-1; i++ {
+		h := make(net.IP, 4)
+		copy(h, base)
+		v := uint32(i)
+		h[0] |= byte(v >> 24)
+		h[1] |= byte(v >> 16)
+		h[2] |= byte(v >> 8)
+		h[3] |= byte(v)
+		out = append(out, h)
+	}
+	return out
+}
+
+func planScan() ScanPlan {
+	var plan ScanPlan
+	own := map[string]bool{}
+	seen := map[string]bool{}
+	add := func(host string) {
+		if !seen[host] {
+			seen[host] = true
+			plan.Targets = append(plan.Targets, net.JoinHostPort(host, itoa(lanDiscPort)))
+		}
+	}
+	type ifa struct {
+		name string
+		n    *net.IPNet
+	}
+	var list []ifa
+	if ifs, err := net.Interfaces(); err == nil {
+		for _, ifc := range ifs {
+			if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, _ := ifc.Addrs()
+			for _, a := range addrs {
+				if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil {
+					own[n.IP.To4().String()] = true
+					list = append(list, ifa{ifc.Name, n})
+				}
+			}
+		}
+	}
+	add("255.255.255.255")
+	for _, it := range list {
+		if b := bcastOf(it.n.IP, it.n.Mask); b != nil {
+			add(b.String())
+		}
+	}
+	for _, it := range list {
+		hs := hostsIn(it.n.IP, it.n.Mask)
+		n := 0
+		first, last := "", ""
+		for _, h := range hs {
+			if own[h.String()] {
+				continue
+			}
+			add(h.String())
+			n++
+			if first == "" {
+				first = h.String()
+			}
+			last = h.String()
+		}
+		ones, _ := it.n.Mask.Size()
+		line := it.name + ": " + it.n.IP.String() + "/" + itoa(ones)
+		if n > 0 {
+			line += " - проверяю " + itoa(n) + " адресов (" + first + " - " + last + ")"
+		} else {
+			line += " - только широковещательный запрос"
+		}
+		plan.Lines = append(plan.Lines, line)
+		plan.Hosts += n
+	}
+	sort.Strings(plan.Targets)
+	return plan
+}
