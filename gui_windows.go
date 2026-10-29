@@ -164,6 +164,8 @@ func guiMain(test bool) int {
 		exchDirLE       *walk.LineEdit
 		shareToCB       *walk.ComboBox
 		scanLbl         *walk.Label
+		topBtn          *walk.PushButton
+		onTop           bool
 		scanLbl2        *walk.Label
 		exchOptsRow     *walk.Composite
 		updDest         func()
@@ -675,7 +677,7 @@ func guiMain(test bool) int {
 			_ = scanLbl2.SetText(t)
 		}
 	}
-	scanPeers := func(verbose bool) {
+	scanPeers := func(verbose bool, pick string) {
 		plan := planScan()
 		if verbose {
 			setScan(fmt.Sprintf("Поиск в сети (UDP 29008): проверяю адресов: %d...", len(plan.Targets)))
@@ -713,6 +715,35 @@ func guiMain(test bool) int {
 				if !verbose {
 					return
 				}
+				pickNote := ""
+				if pick != "" {
+					wantRole, cb, title := roleRecv, destCB, "Найдено несколько получателей"
+					if pick == "recv" {
+						wantRole, cb, title = roleSend, srcCB, "Найдено несколько отправителей"
+					}
+					var cand []Peer
+					for _, p := range found {
+						if p.Role == wantRole {
+							cand = append(cand, p)
+						}
+					}
+					switch {
+					case len(cand) == 1:
+						_ = cb.SetText(cand[0].Label())
+						pickNote = "выбрано: " + cand[0].Label()
+					case len(cand) > 1:
+						labels := make([]string, len(cand))
+						for i, p := range cand {
+							labels[i] = p.Label()
+						}
+						if i := pickPeer(mw, title, labels); i >= 0 {
+							_ = cb.SetText(labels[i])
+							pickNote = "выбрано: " + labels[i]
+						} else {
+							pickNote = "выберите в списке"
+						}
+					}
+				}
 				var names []string
 				for _, p := range found {
 					role := "принимает"
@@ -722,7 +753,11 @@ func guiMain(test bool) int {
 					names = append(names, p.Label()+" - "+role)
 				}
 				if len(found) > 0 {
-					setScan(fmt.Sprintf("Найдено устройств: %d (выберите в списке «Куда»/«Откуда»)", len(found)))
+					note := "выберите в списке «Куда»/«Откуда»"
+					if pickNote != "" {
+						note = pickNote
+					}
+					setScan(fmt.Sprintf("Найдено устройств: %d (%s)", len(found), note))
 				} else {
 					setScan("Устройств не найдено (подробности - в окне «Ход операции»)")
 				}
@@ -741,7 +776,9 @@ func guiMain(test bool) int {
 			})
 		}()
 	}
-	refreshPeers := func() { scanPeers(true) }
+	refreshPeers := func() { scanPeers(true, "") }
+	refreshPeersSend := func() { scanPeers(true, "send") }
+	refreshPeersRecv := func() { scanPeers(true, "recv") }
 	exchStatus := func(full string) {
 		short := full
 		if r := []rune(short); len(r) > 64 {
@@ -1145,7 +1182,7 @@ func guiMain(test bool) int {
 									ComboBox{AssignTo: &destCB, Editable: true, Model: []string{destInternet, destWait, destExch}, CurrentIndex: 0, MinSize: Size{Width: 180},
 										OnCurrentIndexChanged: func() { updDest() }, OnTextChanged: func() { updDest() },
 										ToolTipText: "«Через интернет» - публичные relay croc (получатель с Crocau).\r\n«Через обменники» - файл выкладывается на анонимный файлообменник, вы получаете ссылку; получателю Crocau не нужен. Пароль в этом режиме необязателен: если он задан, файлы в архиве шифруются.\r\n«Ждать получателя в сети» - это устройство открывает порт и ждёт, получатель находит его на вкладке «Получить» или вводит ваш IP.\r\nУстройство из списка - получатель в режиме обмена (вкладка «Обмен»). Можно вписать IP вручную, например 192.168.1.5."},
-									PushButton{Text: "Найти в сети", OnClicked: refreshPeers},
+									PushButton{Text: "Найти в сети", OnClicked: refreshPeersSend},
 									HSpacer{},
 								},
 							},
@@ -1184,7 +1221,7 @@ func guiMain(test bool) int {
 									ComboBox{AssignTo: &srcCB, Editable: true, Model: []string{destInternet, destExch}, CurrentIndex: 0, MinSize: Size{Width: 180},
 										OnCurrentIndexChanged: func() { updSrc() }, OnTextChanged: func() { updSrc() },
 										ToolTipText: "«Через интернет» - публичные relay.\r\n«Через обменники» - скачать по ссылке, которую вам прислали.\r\nИли отправитель в вашей сети (он выбрал «Ждать получателя в сети»): найдите его кнопкой «Найти в сети» или впишите его IP, например 192.168.1.5."},
-									PushButton{Text: "Найти в сети", OnClicked: refreshPeers},
+									PushButton{Text: "Найти в сети", OnClicked: refreshPeersRecv},
 									HSpacer{},
 								},
 							},
@@ -1407,6 +1444,19 @@ func guiMain(test bool) int {
 						}
 					}},
 					HSpacer{},
+					PushButton{AssignTo: &topBtn, Text: "Поверх всех", ToolTipText: "Держать окно поверх остальных - удобно перетаскивать в него файлы. Повторное нажатие отключает", OnClicked: func() {
+						onTop = !onTop
+						after := win.HWND_NOTOPMOST
+						if onTop {
+							after = win.HWND_TOPMOST
+						}
+						win.SetWindowPos(mw.Handle(), after, 0, 0, 0, 0, win.SWP_NOMOVE|win.SWP_NOSIZE)
+						if onTop {
+							_ = topBtn.SetText("Поверх всех ✓")
+						} else {
+							_ = topBtn.SetText("Поверх всех")
+						}
+					}},
 					PushButton{Text: "В трей", ToolTipText: "Свернуть в область уведомлений (значок возле часов). Вернуть окно: щелчок по значку", OnClicked: func() {
 						if err := hideToTray(); err != nil {
 							warn("Не удалось свернуть в трей: " + err.Error())
@@ -1478,7 +1528,7 @@ func guiMain(test bool) int {
 	}
 	exchStatus("Выключен")
 	if !test {
-		scanPeers(false) // сразу заполнить список устройств
+		scanPeers(false, "") // сразу заполнить список устройств
 		shellCleanupLegacy()
 		listenIfFree()
 		if shellListener != nil {
@@ -2049,4 +2099,32 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 	lanRelayPorts, lanDiscPort = oldPorts, oldDisc
 	skipFirewall = false
 	return finishTest()
+}
+
+// pickPeer показывает список найденных устройств и возвращает номер выбранного (-1 - отмена).
+func pickPeer(owner walk.Form, title string, labels []string) int {
+	var dlg *walk.Dialog
+	var lb *walk.ListBox
+	var okPB, cancelPB *walk.PushButton
+	res := -1
+	choose := func() {
+		if i := lb.CurrentIndex(); i >= 0 {
+			res = i
+			dlg.Accept()
+		}
+	}
+	_, _ = Dialog{
+		AssignTo: &dlg, Title: title, DefaultButton: &okPB, CancelButton: &cancelPB,
+		MinSize: Size{Width: 380, Height: 240}, Layout: VBox{},
+		Children: []Widget{
+			Label{Text: "Выберите устройство:"},
+			ListBox{AssignTo: &lb, Model: labels, OnItemActivated: choose},
+			Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
+				HSpacer{},
+				PushButton{AssignTo: &okPB, Text: "Выбрать", OnClicked: choose},
+				PushButton{AssignTo: &cancelPB, Text: "Отмена", OnClicked: func() { dlg.Cancel() }},
+			}},
+		},
+	}.Run(owner)
+	return res
 }
