@@ -111,7 +111,7 @@ func newChatPanel(mw *walk.MainWindow, host walk.Container, kind string, notify 
 	nb.Clicked().Attach(func() { p.applyName() })
 	p.commonC, _ = walk.NewCheckBox(ctrl)
 	_ = p.commonC.SetText("Общая комната")
-	_ = p.commonC.SetChecked(kc.Common)
+	p.commonC.SetChecked(kc.Common)
 	p.commonC.CheckedChanged().Attach(func() { p.toggleCommon() })
 	lb2, _ := walk.NewLabel(ctrl)
 	_ = lb2.SetText("пароль:")
@@ -257,14 +257,14 @@ func (p *chatPanel) toggleCommon() {
 	p.ensureStarted()
 	if p.commonC.Checked() {
 		p.openRoom("Общая", p.commonPw(), true, true)
-		_ = p.commonP.SetEnabled(false)
+		p.commonP.SetEnabled(false)
 	} else {
 		for id, pg := range p.pages {
 			if pg.common {
 				p.dropPage(id)
 			}
 		}
-		_ = p.commonP.SetEnabled(true)
+		p.commonP.SetEnabled(true)
 	}
 	p.saveCfg()
 }
@@ -299,7 +299,7 @@ func (p *chatPanel) closeCurrent() {
 	for id, pg := range p.pages {
 		if pg.page == p.tw.Pages().At(i) {
 			if pg.common {
-				_ = p.commonC.SetChecked(false)
+				p.commonC.SetChecked(false)
 				return
 			}
 			if walk.MsgBox(p.mw, "Закрыть вкладку", "Закрыть «"+pg.room.Label+"»?\nИстория сохранится на диске; чтобы вернуться, добавьте комнату с тем же паролем.", walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) != walk.DlgCmdYes {
@@ -508,7 +508,7 @@ func (p *chatPanel) refresh(id string, fromNet bool) {
 	text := sb.String()
 	_ = pg.te.SetText(text)
 	n := len(utf16.Encode([]rune(text)))
-	_ = pg.te.SetTextSelection(n, n)
+	pg.te.SetTextSelection(n, n)
 	pg.te.SendMessage(win.EM_SCROLLCARET, 0, 0)
 	cur := pg.filesCB.CurrentIndex()
 	_ = pg.filesCB.SetModel(names)
