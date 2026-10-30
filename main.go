@@ -32,6 +32,8 @@ func main() {
 			os.Exit(fwRemoveMain())
 		case "--fwtest":
 			os.Exit(fwSelfTest())
+		case "--chattest":
+			os.Exit(chatSpike())
 		case "--nettest":
 			os.Exit(netTest())
 		case "--send":

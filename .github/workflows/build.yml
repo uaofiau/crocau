@@ -31,7 +31,7 @@ jobs:
             git clone --depth 1 --branch "${CROC_VERSION}" https://github.com/schollz/croc.git croc-patched &&
             git -C croc-patched apply "$GITHUB_WORKSPACE/patches/croc-v10.0.12-sendfile-race.patch" &&
             go mod edit -replace "github.com/schollz/croc/v10=./croc-patched" &&
-            go get github.com/lxn/walk@latest github.com/lxn/win@latest github.com/schollz/croc/v10@${CROC_VERSION} &&
+            go get github.com/btcsuite/btcd/btcec/v2@v2.3.2 github.com/decred/dcrd/dcrec/secp256k1/v4@v4.2.0 github.com/lxn/walk@latest github.com/lxn/win@latest github.com/schollz/croc/v10@${CROC_VERSION} &&
             go mod tidy
           } > mod.log 2>&1
           rc=$?
@@ -144,6 +144,22 @@ jobs:
           Write-Host $out
           $msg = $out -replace "`r?`n", "%0A"
           Write-Host "::notice title=nettest exit=$code::$msg"
+
+      - name: Chat transports check (informational)
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          $env:CROCAU_TESTLOG = "$PWD\chattest.log"
+          $p = Start-Process -FilePath "$PWD\crocau.exe" -ArgumentList '--chattest' -PassThru
+          $done = $p.WaitForExit(200000)
+          if ($done) { $code = $p.ExitCode } else { $code = 99 }
+          Get-Process crocau -ErrorAction SilentlyContinue | Stop-Process -Force
+          $out = ""
+          if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw -Encoding UTF8 }
+          Write-Host $out
+          $msg = $out -replace "`r?`n", "%0A"
+          Write-Host "::notice title=chattest exit=$code::$msg"
 
   release:
     needs: test-win
