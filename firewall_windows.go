@@ -23,6 +23,12 @@ func fwNames() (tcp, udp string) {
 	return "crocau LAN TCP " + id, "crocau LAN UDP " + id
 }
 
+// fwChatNames - правила для локального чата (TCP-порт сообщений и UDP-порт поиска).
+func fwChatNames() (tcp, udp string) {
+	t, u := fwNames()
+	return strings.Replace(t, "LAN TCP", "chat TCP", 1), strings.Replace(u, "LAN UDP", "chat UDP", 1)
+}
+
 func netsh(args ...string) error {
 	cmd := exec.Command("netsh", append([]string{"advfirewall", "firewall"}, args...)...)
 	hideWindow(cmd)
@@ -34,7 +40,13 @@ func netsh(args ...string) error {
 
 func fwPresent() bool {
 	tcp, udp := fwNames()
-	return netsh("show", "rule", "name="+tcp) == nil && netsh("show", "rule", "name="+udp) == nil
+	ctcp, cudp := fwChatNames()
+	for _, n := range []string{tcp, udp, ctcp, cudp} {
+		if netsh("show", "rule", "name="+n) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func tcpRange() string {
@@ -54,20 +66,34 @@ func fwInstallDirect() error {
 		"program="+exe, "profile=any", "enable=yes")
 	e2 := netsh("add", "rule", "name="+udp, "dir=in", "action=allow", "protocol=UDP", "localport="+itoa(lanDiscPort),
 		"program="+exe, "profile=any", "enable=yes")
-	if e1 != nil {
-		return e1
+	ctcp, cudp := fwChatNames()
+	_ = netsh("delete", "rule", "name="+ctcp)
+	_ = netsh("delete", "rule", "name="+cudp)
+	e3 := netsh("add", "rule", "name="+ctcp, "dir=in", "action=allow", "protocol=TCP", "localport="+itoa(chatTCPPort),
+		"program="+exe, "profile=any", "enable=yes")
+	e4 := netsh("add", "rule", "name="+cudp, "dir=in", "action=allow", "protocol=UDP", "localport="+itoa(chatDiscPort),
+		"program="+exe, "profile=any", "enable=yes")
+	for _, e := range []error{e1, e2, e3, e4} {
+		if e != nil {
+			return e
+		}
 	}
-	return e2
+	return nil
 }
 
 func fwRemoveDirect() error {
 	tcp, udp := fwNames()
 	e1 := netsh("delete", "rule", "name="+tcp)
 	e2 := netsh("delete", "rule", "name="+udp)
-	if e1 != nil {
-		return e1
+	ctcp, cudp := fwChatNames()
+	e3 := netsh("delete", "rule", "name="+ctcp)
+	e4 := netsh("delete", "rule", "name="+cudp)
+	for _, e := range []error{e1, e2, e3, e4} {
+		if e != nil {
+			return e
+		}
 	}
-	return e2
+	return nil
 }
 
 // elevated перезапускает этот же exe с правами администратора (запрос UAC) и ждёт результата.

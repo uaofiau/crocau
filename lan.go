@@ -269,14 +269,16 @@ func hostsIn(ip net.IP, mask net.IPMask) []net.IP {
 	return out
 }
 
-func planScan() ScanPlan {
+func planScan() ScanPlan { return planScanPort(lanDiscPort) }
+
+func planScanPort(port int) ScanPlan {
 	var plan ScanPlan
 	own := map[string]bool{}
 	seen := map[string]bool{}
 	add := func(host string) {
 		if !seen[host] {
 			seen[host] = true
-			plan.Targets = append(plan.Targets, net.JoinHostPort(host, itoa(lanDiscPort)))
+			plan.Targets = append(plan.Targets, net.JoinHostPort(host, itoa(port)))
 		}
 	}
 	type ifa struct {

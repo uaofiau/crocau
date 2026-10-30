@@ -151,6 +151,8 @@ func guiMain(test bool) int {
 		modeProxyRB     *walk.RadioButton
 		directLbl       *walk.Label
 		tabs            *walk.TabWidget
+		chatLanHost     *walk.Composite
+		chatLan         *chatPanel
 		masterStatusLbl *walk.Label
 		masterSetBtn    *walk.PushButton
 		masterOffBtn    *walk.PushButton
@@ -1362,6 +1364,21 @@ func guiMain(test bool) int {
 						},
 					},
 					{
+						Title:  "Чат локально",
+						Layout: VBox{},
+						Children: []Widget{
+							Composite{AssignTo: &chatLanHost, Layout: VBox{MarginsZero: true}},
+						},
+					},
+					{
+						Title:  "Чат интернет",
+						Layout: VBox{},
+						Children: []Widget{
+							Label{Text: "Чат через интернет (комнаты по паролю, без регистрации, история и файлы) появится в следующей версии.\r\nЛокальный чат уже работает на соседней вкладке."},
+							VSpacer{},
+						},
+					},
+					{
 						Title:  "Прокси",
 						Layout: VBox{},
 						Children: append(append([]Widget{
@@ -1480,6 +1497,20 @@ func guiMain(test bool) int {
 		te.SetMaxLength(0x7FFFFFFE)
 	}
 
+	// локальный чат
+	if cp, err := newChatPanel(mw, chatLanHost, "lan", notify, func() string { return resolveOutDir(outLE.Text()) },
+		func() bool { return !trayHidden }); err == nil {
+		chatLan = cp
+		if kc := cp.cfg.Kinds["lan"]; kc.Common || len(kc.Rooms) > 0 {
+			mw.Synchronize(chatLan.ensureStarted)
+		}
+		tabs.CurrentIndexChanged().Attach(func() {
+			if i := tabs.CurrentIndex(); i >= 0 && tabs.Pages().At(i).Title() == "Чат локально" {
+				chatLan.ensureStarted()
+			}
+		})
+	}
+
 	// Иконка окна - из ресурсов exe (rsrc: манифест = ID 1, группа иконок = ID 2).
 	icon, iconErr := walk.NewIconFromResourceId(2)
 	if iconErr == nil {
@@ -1568,6 +1599,9 @@ func guiMain(test bool) int {
 		}
 		shareW.Stop()
 		exch.Stop()
+		if chatLan != nil {
+			chatLan.stop()
+		}
 		if curHost != nil {
 			curHost.Close()
 		}
@@ -1609,7 +1643,7 @@ func guiMain(test bool) int {
 				minSizeCheck: func() string {
 					_ = tabs.SetCurrentIndex(0)
 					var problems, sizes []string
-					for i := 0; i < 5; i++ {
+					for i := 0; i < tabs.Pages().Len(); i++ {
 						_ = tabs.SetCurrentIndex(i)
 						_ = mw.SetBounds(walk.Rectangle{X: 20, Y: 20, Width: 900, Height: 800})
 						_ = mw.SetBounds(walk.Rectangle{X: 20, Y: 20, Width: 650, Height: 600})

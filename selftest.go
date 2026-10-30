@@ -1170,6 +1170,9 @@ func selfTest() int {
 		}
 	}
 
+	// 4d) локальный чат (движок)
+	fails += chatSelfTest()
+
 	// 5) не должно появляться croc-config рядом с exe
 	if fileExists(filepath.Join(exeDir(), "croc-config")) {
 		fails++
