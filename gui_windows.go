@@ -1780,6 +1780,7 @@ func guiMain(test bool) int {
 					}
 					return len(histTexts), histTexts[0]
 				},
+				exchLog: func() string { return exch.lastFailText() + "\n" + exchText.Text() },
 				trayHide: func() string {
 					if err := hideToTray(); err != nil {
 						return err.Error()
@@ -1953,6 +1954,7 @@ type guiHooks struct {
 	exchToggle, trayShow                                            func()
 	exchRunning                                                     func() bool
 	exchHistory                                                     func() (int, string)
+	exchLog                                                         func() string
 	trayHide                                                        func() string
 }
 
@@ -2174,6 +2176,13 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 		} else {
 			fails++
 			testLogf("GUI EXCHANGE MODE: FAIL first=%v second=%v history=%d top=%q running=%v portClosed=%v", okA, okB, cnt, top, running, closed)
+			if s1 != nil {
+				testLogf("sender1 log: %s", s1.Log())
+			}
+			if s2 != nil {
+				testLogf("sender2 log: %s", s2.Log())
+			}
+			ui(func() { testLogf("exchange log: %s", h.exchLog()) })
 		}
 	}
 	// 4) отправитель в окне "ждёт получателя в сети": получатель находит его и забирает данные
