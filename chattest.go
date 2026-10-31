@@ -101,7 +101,7 @@ func chatSelfTest() int {
 	// файл
 	src := filepath.Join(da, "док.txt")
 	_ = os.WriteFile(src, []byte("содержимое файла"), 0o644)
-	_ = a.SendFile(ra, src)
+	_ = a.SendFile(ra, src, nil)
 	var fm *ChatFile
 	waitFor(5*time.Second, func() bool {
 		for _, m := range rb.Messages() {

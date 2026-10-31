@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -70,8 +71,11 @@ const chatCommonDefaultPw = "crocau-common"
 type ChatFile struct {
 	Name  string   `json:"name"`
 	Size  int64    `json:"size"`
-	Tok   string   `json:"tok"`
+	Tok   string   `json:"tok,omitempty"`
 	Addrs []string `json:"addrs,omitempty"`
+	// Интернет-чат: файл лежит на обменнике в зашифрованном виде; ключ расшифровки - только внутри сообщения.
+	Link string `json:"l,omitempty"`
+	Key  string `json:"k,omitempty"`
 }
 
 // ChatMsg - сообщение чата (внутри шифрования).
@@ -90,6 +94,9 @@ type chatFrame struct {
 	ID string `json:"i"`
 	TS int64  `json:"ts"`
 	C  string `json:"c"`
+	// Интернет-чат: автор события Nostr и подпись (чтобы пересылать событие дальше на серверы).
+	A string `json:"a,omitempty"`
+	S string `json:"s,omitempty"`
 }
 
 // ChatRoom - комната: история и ключ.
@@ -104,6 +111,9 @@ type ChatRoom struct {
 	blobs map[string]chatFrame
 	names map[string]string
 	nameT map[string]int64
+	// enforceAuthor: для живых сообщений автор (UID) должен совпадать с подписавшим событие (authors[frameID]).
+	enforceAuthor bool
+	authors       map[string]string
 	// clearedTS - всё, что старше этого времени, считается очищенным (очистка чата локально или у всех).
 	clearedTS int64
 }
@@ -174,6 +184,10 @@ func (r *ChatRoom) add(f chatFrame, persist bool) (ChatMsg, bool) {
 	if err != nil {
 		return ChatMsg{}, false
 	}
+	if persist && r.enforceAuthor && (r.authors[f.ID] == "" || r.authors[f.ID] != m.UID) {
+		return ChatMsg{}, false
+	}
+	delete(r.authors, f.ID)
 	r.blobs[f.ID] = f
 	if m.Kind == "clear" {
 		if m.TS < r.clearedTS {
@@ -340,6 +354,17 @@ func (r *ChatRoom) missingFor(have []string, limit int) []chatFrame {
 	return out
 }
 
+// allFrames - все известные кадры (для повторной отправки на серверы).
+func (r *ChatRoom) allFrames() []chatFrame {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]chatFrame, 0, len(r.msgs))
+	for _, m := range r.msgs {
+		out = append(out, r.blobs[m.ID])
+	}
+	return out
+}
+
 func newMsgID() string { return randHex(8) }
 
 func nowMs() int64 { return time.Now().UnixNano() / 1e6 }
@@ -356,3 +381,27 @@ func (m ChatMsg) FormatLine() string {
 	}
 	return t + "  " + name + ": " + m.Text
 }
+
+// ChatBackend - то, что нужно окну чата от сети: локальная (ChatNode) или интернет (NetChat).
+type ChatBackend interface {
+	Start() error
+	Stop()
+	Ready() bool
+	Name() string
+	UserID() string
+	Rename(name string)
+	AddRoom(label, pw string) (*ChatRoom, error)
+	RemoveRoom(id string)
+	SendText(r *ChatRoom, text string) error
+	SendFile(r *ChatRoom, path string, note func(string)) error
+	ClearAll(r *ChatRoom)
+	Download(ctx context.Context, f ChatFile, destDir string, progress func(done, total int64)) (string, error)
+	PeerCount() int
+	PeerInfo() []string
+	SetCallbacks(upd func(string), peers func())
+}
+
+var (
+	_ ChatBackend = (*ChatNode)(nil)
+	_ ChatBackend = (*NetChat)(nil)
+)

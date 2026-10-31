@@ -22,19 +22,24 @@ type nostrEvent struct {
 	Sig       string     `json:"sig"`
 }
 
-func nostrNewKey() (*btcec.PrivateKey, error) { return btcec.NewPrivateKey() }
+// nostrPriv - закрытый ключ подписи.
+type nostrPriv = btcec.PrivateKey
 
-func nostrPubHex(priv *btcec.PrivateKey) string {
+func nostrNewKey() (*nostrPriv, error) { return btcec.NewPrivateKey() }
+
+func nostrKeyBytes(k *nostrPriv) []byte { return k.Serialize() }
+
+func nostrPubHex(priv *nostrPriv) string {
 	return hex.EncodeToString(schnorr.SerializePubKey(priv.PubKey()))
 }
 
-func nostrKeyFromBytes(b []byte) *btcec.PrivateKey {
+func nostrKeyFromBytes(b []byte) *nostrPriv {
 	k, _ := btcec.PrivKeyFromBytes(b)
 	return k
 }
 
 // nostrSign собирает и подписывает событие.
-func nostrSign(priv *btcec.PrivateKey, kind int, tags [][]string, content string, ts int64) (nostrEvent, error) {
+func nostrSign(priv *nostrPriv, kind int, tags [][]string, content string, ts int64) (nostrEvent, error) {
 	if tags == nil {
 		tags = [][]string{}
 	}
@@ -53,4 +58,43 @@ func nostrSign(priv *btcec.PrivateKey, kind int, tags [][]string, content string
 	}
 	ev.Sig = hex.EncodeToString(sig.Serialize())
 	return ev, nil
+}
+
+// nostrEventID вычисляет идентификатор события по NIP-01.
+func nostrEventID(ev nostrEvent) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	tags := ev.Tags
+	if tags == nil {
+		tags = [][]string{}
+	}
+	_ = enc.Encode([]interface{}{0, ev.PubKey, ev.CreatedAt, ev.Kind, tags, ev.Content})
+	sum := sha256.Sum256(bytes.TrimRight(buf.Bytes(), "\n"))
+	return hex.EncodeToString(sum[:])
+}
+
+// nostrVerify проверяет идентификатор и подпись события.
+func nostrVerify(ev nostrEvent) bool {
+	if len(ev.ID) != 64 || len(ev.PubKey) != 64 || len(ev.Sig) != 128 || nostrEventID(ev) != ev.ID {
+		return false
+	}
+	pk, err := hex.DecodeString(ev.PubKey)
+	if err != nil {
+		return false
+	}
+	pub, err := schnorr.ParsePubKey(pk)
+	if err != nil {
+		return false
+	}
+	sb, err := hex.DecodeString(ev.Sig)
+	if err != nil {
+		return false
+	}
+	sig, err := schnorr.ParseSignature(sb)
+	if err != nil {
+		return false
+	}
+	id, _ := hex.DecodeString(ev.ID)
+	return sig.Verify(id, pub)
 }

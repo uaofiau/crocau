@@ -22,8 +22,9 @@ type chatKindCfg struct {
 }
 
 type chatCfg struct {
-	UID   string                 `json:"uid"`
-	Kinds map[string]chatKindCfg `json:"kinds"`
+	UID    string                 `json:"uid"`
+	NetKey string                 `json:"netKey,omitempty"` // ключ подписи интернет-чата (hex, защищён)
+	Kinds  map[string]chatKindCfg `json:"kinds"`
 }
 
 var chatCfgMu sync.Mutex
@@ -33,6 +34,14 @@ func chatDataDir() string { return filepath.Join(exeDir(), "crocau-chat") }
 func chatCfgPath() string { return filepath.Join(chatDataDir(), "chat.json") }
 
 func loadChatCfg() chatCfg {
+	c, fresh := loadChatCfgRaw()
+	if fresh {
+		_ = saveChatCfg(c) // постоянный идентификатор сохраняем сразу, чтобы обе вкладки чата видели один и тот же
+	}
+	return c
+}
+
+func loadChatCfgRaw() (chatCfg, bool) {
 	chatCfgMu.Lock()
 	defer chatCfgMu.Unlock()
 	var c chatCfg
@@ -42,10 +51,12 @@ func loadChatCfg() chatCfg {
 	if c.Kinds == nil {
 		c.Kinds = map[string]chatKindCfg{}
 	}
+	fresh := false
 	if c.UID == "" {
 		c.UID = randHex(8)
+		fresh = true
 	}
-	return c
+	return c, fresh
 }
 
 func saveChatCfg(c chatCfg) error {

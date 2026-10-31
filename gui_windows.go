@@ -156,6 +156,8 @@ func guiMain(test bool) int {
 		tabs            *walk.TabWidget
 		chatLanHost     *walk.Composite
 		chatLan         *chatPanel
+		chatNetHost     *walk.Composite
+		chatNet         *chatPanel
 		masterStatusLbl *walk.Label
 		masterSetBtn    *walk.PushButton
 		masterOffBtn    *walk.PushButton
@@ -340,8 +342,10 @@ func guiMain(test bool) int {
 		return modeAuto
 	}
 
+	winRec := st.Win
 	collect := func() Settings {
 		return Settings{
+			Win:   winRec,
 			Relay: relayLE.Text(), RelayPass: relayPassLE.Text(), Extra: extraLE.Text(), OutDir: outLE.Text(),
 			Compress:   compressCB.Checked(),
 			OutRel:     outRelCB.Checked(),
@@ -655,7 +659,7 @@ func guiMain(test bool) int {
 	// мигание значка в трее, пока есть непрочитанные сообщения чата
 	var blinkStop chan struct{}
 	updBlink := func() {
-		want := trayHidden && ni != nil && chatLan != nil && chatLan.HasUnread()
+		want := trayHidden && ni != nil && ((chatLan != nil && chatLan.HasUnread()) || (chatNet != nil && chatNet.HasUnread()))
 		if want && blinkStop == nil {
 			stop := make(chan struct{})
 			blinkStop = stop
@@ -696,6 +700,9 @@ func guiMain(test bool) int {
 		win.SetForegroundWindow(mw.Handle())
 		if chatLan != nil {
 			chatLan.onShown()
+		}
+		if chatNet != nil {
+			chatNet.onShown()
 		}
 		updBlink()
 	}
@@ -1416,8 +1423,7 @@ func guiMain(test bool) int {
 						Title:  "Чат интернет",
 						Layout: VBox{},
 						Children: []Widget{
-							Label{Text: "Чат через интернет (комнаты по паролю, без регистрации, история и файлы) появится в следующей версии.\r\nЛокальный чат уже работает на соседней вкладке."},
-							VSpacer{},
+							Composite{AssignTo: &chatNetHost, Layout: VBox{MarginsZero: true}},
 						},
 					},
 					{
@@ -1540,24 +1546,56 @@ func guiMain(test bool) int {
 		te.SetMaxLength(0x7FFFFFFE)
 	}
 
-	// локальный чат
-	if cp, err := newChatPanel(mw, chatLanHost, "lan", notify, func() string { return resolveOutDir(outLE.Text()) },
-		func() bool {
-			i := tabs.CurrentIndex()
-			return !trayHidden && mw.Visible() && !win.IsIconic(mw.Handle()) && i >= 0 && tabs.Pages().At(i).Title() == "Чат локально"
-		}); err == nil {
-		chatLan = cp
-		cp.onUnread = updBlink
-		if kc := cp.cfg.Kinds["lan"]; kc.Common || len(kc.Rooms) > 0 {
-			mw.Synchronize(chatLan.ensureStarted)
-		}
-		tabs.CurrentIndexChanged().Attach(func() {
-			if i := tabs.CurrentIndex(); i >= 0 && tabs.Pages().At(i).Title() == "Чат локально" {
-				chatLan.ensureStarted()
-				chatLan.onShown()
-			}
+	// чаты: локальный и интернет (интернет-чат использует маршруты вкладки «Прокси»)
+	// настройки читаются из окна только в потоке окна; фоновые соединения чата берут их через Synchronize
+	var lastSet Settings
+	var lastSetMu sync.Mutex
+	getSet := func() Settings {
+		done := make(chan struct{})
+		mw.Synchronize(func() {
+			s := collect()
+			lastSetMu.Lock()
+			lastSet = s
+			lastSetMu.Unlock()
+			close(done)
 		})
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
+		lastSetMu.Lock()
+		defer lastSetMu.Unlock()
+		return lastSet
 	}
+	mkChat := func(host *walk.Composite, kind, title string) *chatPanel {
+		cp, err := newChatPanel(mw, host, kind, title, getSet, notify, func() string { return resolveOutDir(outLE.Text()) },
+			func() bool {
+				i := tabs.CurrentIndex()
+				return !trayHidden && mw.Visible() && !win.IsIconic(mw.Handle()) && i >= 0 && tabs.Pages().At(i).Title() == title
+			})
+		if err != nil {
+			return nil
+		}
+		cp.onUnread = updBlink
+		if kc := cp.cfg.Kinds[kind]; kc.Common || len(kc.Rooms) > 0 {
+			mw.Synchronize(cp.ensureStarted)
+		}
+		return cp
+	}
+	chatLan = mkChat(chatLanHost, "lan", "Чат локально")
+	chatNet = mkChat(chatNetHost, "net", "Чат интернет")
+	tabs.CurrentIndexChanged().Attach(func() {
+		i := tabs.CurrentIndex()
+		if i < 0 {
+			return
+		}
+		for _, cp := range []*chatPanel{chatLan, chatNet} {
+			if cp != nil && tabs.Pages().At(i).Title() == cp.title {
+				cp.ensureStarted()
+				cp.onShown()
+			}
+		}
+	})
 
 	// Иконка окна - из ресурсов exe (rsrc: манифест = ID 1, группа иконок = ID 2).
 	icon, iconErr := walk.NewIconFromResourceId(2)
@@ -1585,13 +1623,15 @@ func guiMain(test bool) int {
 		_ = ni.ContextMenu().Actions().Add(quit)
 		ni.MessageClicked().Attach(func() {
 			restoreFromTray()
-			if chatLan != nil && chatLan.HasUnread() {
-				for i := 0; i < tabs.Pages().Len(); i++ {
-					if tabs.Pages().At(i).Title() == "Чат локально" {
+			// первая по порядку вкладка чата с непрочитанным
+			for i := 0; i < tabs.Pages().Len(); i++ {
+				for _, cp := range []*chatPanel{chatLan, chatNet} {
+					if cp != nil && cp.HasUnread() && tabs.Pages().At(i).Title() == cp.title {
 						_ = tabs.SetCurrentIndex(i)
+						cp.FocusUnread()
+						return
 					}
 				}
-				chatLan.FocusUnread()
 			}
 		})
 		ni.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
@@ -1648,9 +1688,10 @@ func guiMain(test bool) int {
 		}
 	}
 
-	if !test {
-		restoreWindowGeom(mw, 650, 600)
+	if !test && !restoreWindowGeom(mw, winRec, 650, 600) {
+		winRec = "" // запись от другого компьютера или повреждена: сбрасываем, при выходе запишется новая
 	}
+	_ = os.Remove(filepath.Join(exeDir(), "crocau-window.dat")) // файл ранних сборок
 	win.DragAcceptFiles(mw.Handle(), true)
 	mw.DropFiles().Attach(func(files []string) { addPaths(files) })
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
@@ -1663,8 +1704,11 @@ func guiMain(test bool) int {
 		if chatLan != nil {
 			chatLan.stop()
 		}
+		if chatNet != nil {
+			chatNet.stop()
+		}
 		if !test {
-			saveWindowGeom(mw)
+			winRec = currentWinRecord(mw)
 		}
 		if curHost != nil {
 			curHost.Close()

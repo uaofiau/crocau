@@ -52,7 +52,9 @@ type Settings struct {
 	MasterSalt  string
 	MasterCheck string
 	// Locked - файл защищён мастер-паролем, а он не введён (не сохраняется в файл).
-	Locked    bool
+	Locked bool
+	// Win - положение окна: "отпечаток компьютера|x|y|w|h|развёрнуто"; на другом компьютере запись сбрасывается.
+	Win       string
 	ProxyMode string
 	ProxySel  int
 	Proxies   []ProxyCfg
@@ -192,6 +194,8 @@ func loadSettingsFrom(path string) Settings {
 			s.ExchName = v
 		case "ExchTo":
 			s.ExchTo = v
+		case "Win":
+			s.Win = v
 		case "ExchWatch":
 			s.ExchWatch = v == "1"
 		case "ExchDir":
@@ -315,6 +319,9 @@ func saveSettingsTo(path string, s Settings) error {
 		"\r\nSaveRecvPw=" + b2s(s.SaveRecvPw) + "\r\nRecvPw=" + recvPw +
 		"\r\nExchName=" + s.ExchName + "\r\nExchTo=" + s.ExchTo + "\r\nExchWatch=" + b2s(s.ExchWatch) + "\r\nExchDir=" + exchDirForSave(s.ExchDir) + "\r\nExchAuto=" + b2s(s.ExchAuto) +
 		"\r\nSaveExchPw=" + b2s(s.SaveExchPw) + "\r\nExchPw=" + exchPw + "\r\n"
+	if s.Win != "" {
+		text += "Win=" + s.Win + "\r\n"
+	}
 	for _, p := range s.Proxies {
 		text += "ProxyEntry=" + encodeProxy(p, seal) + "\r\n"
 	}

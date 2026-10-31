@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -31,6 +32,18 @@ const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 // wsDial открывает ws:// или wss:// напрямую или через маршрут r (прокси).
 func wsDial(ctx context.Context, rawURL string, r Route, timeout time.Duration) (*wsConn, error) {
+	w, err := wsDialRoots(ctx, rawURL, r, timeout, nil)
+	if err != nil && strings.Contains(err.Error(), "x509") {
+		if pool := fallbackRoots(); pool != nil {
+			if w2, err2 := wsDialRoots(ctx, rawURL, r, timeout, pool); err2 == nil {
+				return w2, nil
+			}
+		}
+	}
+	return w, err
+}
+
+func wsDialRoots(ctx context.Context, rawURL string, r Route, timeout time.Duration, roots *x509.CertPool) (*wsConn, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, err
@@ -58,7 +71,7 @@ func wsDial(ctx context.Context, rawURL string, r Route, timeout time.Duration) 
 	}
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 	if secure {
-		tc := tls.Client(conn, &tls.Config{ServerName: u.Hostname()})
+		tc := tls.Client(conn, &tls.Config{ServerName: u.Hostname(), RootCAs: roots})
 		if err := tc.Handshake(); err != nil {
 			conn.Close()
 			return nil, err

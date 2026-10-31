@@ -104,6 +104,12 @@ func NewChatNode(dir, uid, name string) *ChatNode {
 		tcpPort: chatTCPPort, discPort: chatDiscPort, stop: make(chan struct{})}
 }
 
+func (n *ChatNode) SetCallbacks(upd func(string), peers func()) { n.OnUpdate, n.OnPeers = upd, peers }
+
+func (n *ChatNode) UserID() string { return n.UID }
+
+func (n *ChatNode) Ready() bool { return n.ln != nil }
+
 func (n *ChatNode) Name() string { n.mu.Lock(); defer n.mu.Unlock(); return n.name }
 
 func (n *ChatNode) Port() int { return n.tcpPort }
@@ -295,7 +301,7 @@ func (n *ChatNode) SendText(r *ChatRoom, text string) error {
 }
 
 // SendFile предлагает файл в комнате: сам файл остаётся у отправителя и скачивается по запросу участников.
-func (n *ChatNode) SendFile(r *ChatRoom, path string) error {
+func (n *ChatNode) SendFile(r *ChatRoom, path string, _ func(string)) error {
 	st, err := os.Stat(path)
 	if err != nil {
 		return err

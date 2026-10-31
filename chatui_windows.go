@@ -50,7 +50,10 @@ type chatPanel struct {
 	outDir  func() string
 	isHere  func() bool // открыта ли вкладка чата и окно не в трее
 	mu      sync.Mutex
-	node    *ChatNode
+	node    ChatBackend
+	lan     *ChatNode // только для локального чата
+	getSet  func() Settings
+	title   string // название вкладки окна
 	cfg     chatCfg
 	started bool
 	tw      *walk.TabWidget
@@ -101,8 +104,8 @@ func promptLines(owner walk.Form, title, message string, labels, initial []strin
 	return res, accepted
 }
 
-func newChatPanel(mw *walk.MainWindow, host walk.Container, kind string, notify func(string, string), outDir func() string, isHere func() bool) (*chatPanel, error) {
-	p := &chatPanel{mw: mw, kind: kind, notify: notify, outDir: outDir, isHere: isHere, pages: map[string]*chatPage{}}
+func newChatPanel(mw *walk.MainWindow, host walk.Container, kind, title string, getSet func() Settings, notify func(string, string), outDir func() string, isHere func() bool) (*chatPanel, error) {
+	p := &chatPanel{mw: mw, kind: kind, title: title, getSet: getSet, notify: notify, outDir: outDir, isHere: isHere, pages: map[string]*chatPage{}}
 	p.cfg = loadChatCfg()
 	kc := p.cfg.Kinds[kind]
 	if kc.Name == "" {
@@ -155,17 +158,26 @@ func newChatPanel(mw *walk.MainWindow, host walk.Container, kind string, notify 
 	}
 	p.status, _ = walk.NewLabel(bar)
 	_ = p.status.SetText("Чат не запущен. Нажмите «+» или включите общую комнату.")
-	find, _ := walk.NewPushButton(bar)
-	_ = find.SetText("Найти устройства")
-	find.Clicked().Attach(func() { p.rescan() })
+	if kind == "lan" {
+		find, _ := walk.NewPushButton(bar)
+		_ = find.SetText("Найти устройства")
+		find.Clicked().Attach(func() { p.rescan() })
+	}
 	peersBtn, _ := walk.NewPushButton(bar)
-	_ = peersBtn.SetText("Устройства")
-	_ = peersBtn.SetToolTipText("Показать устройства на связи: имя и IP-адрес (текст можно скопировать)")
+	if kind == "lan" {
+		_ = peersBtn.SetText("Устройства")
+		_ = peersBtn.SetToolTipText("Показать устройства на связи: имя и IP-адрес (текст можно скопировать)")
+	} else {
+		_ = peersBtn.SetText("Серверы")
+		_ = peersBtn.SetToolTipText("Показать состояние серверов, через которые идут сообщения (текст можно скопировать)")
+	}
 	peersBtn.Clicked().Attach(func() { p.showPeers() })
-	addr, _ := walk.NewPushButton(bar)
-	_ = addr.SetText("Адрес...")
-	_ = addr.SetToolTipText("Добавить устройство вручную (например, адрес из ZeroTier или другой подсети)")
-	addr.Clicked().Attach(func() { p.addPeerDialog() })
+	if kind == "lan" {
+		addr, _ := walk.NewPushButton(bar)
+		_ = addr.SetText("Адрес...")
+		_ = addr.SetToolTipText("Добавить устройство вручную (например, адрес из ZeroTier или другой подсети)")
+		addr.Clicked().Attach(func() { p.addPeerDialog() })
+	}
 	return p, nil
 }
 
@@ -176,9 +188,29 @@ func (p *chatPanel) ensureStarted() {
 	}
 	p.started = true
 	kc := p.cfg.Kinds[p.kind]
-	p.node = NewChatNode(chatDataDir(), p.cfg.UID, kc.Name)
-	p.node.OnUpdate = func(id string) { p.mw.Synchronize(func() { p.refresh(id, true) }) }
-	p.node.OnPeers = func() { p.mw.Synchronize(p.updStatus) }
+	if p.kind == "lan" {
+		p.lan = NewChatNode(chatDataDir(), p.cfg.UID, kc.Name)
+		p.node = p.lan
+	} else {
+		keyHex := ""
+		if p.cfg.NetKey != "" {
+			keyHex, _ = openSecret(p.cfg.NetKey)
+		}
+		if len(keyHex) != 64 {
+			keyHex = newNetKey()
+			if sealed, err := sealSecret(keyHex); err == nil {
+				p.cfg.NetKey = sealed
+				_ = saveChatCfg(p.cfg)
+			}
+		}
+		nc, err := NewNetChat(chatDataDir(), keyHex, kc.Name, p.getSet)
+		if err != nil {
+			_ = p.status.SetText("Интернет-чат: " + err.Error())
+			return
+		}
+		p.node = nc
+	}
+	p.node.SetCallbacks(func(id string) { p.mw.Synchronize(func() { p.refresh(id, true) }) }, func() { p.mw.Synchronize(p.updStatus) })
 	for _, rc := range kc.Rooms {
 		if pw, err := openSecret(rc.Pw); err == nil && pw != "" {
 			p.openRoom(rc.Label, pw, false, false)
@@ -189,7 +221,10 @@ func (p *chatPanel) ensureStarted() {
 	}
 	_ = p.status.SetText("Запуск чата...")
 	go func() {
-		fwErr := fwEnsure()
+		var fwErr error
+		if p.kind == "lan" {
+			fwErr = fwEnsure()
+		}
 		err := p.node.Start()
 		p.mw.Synchronize(func() {
 			if err != nil {
@@ -221,6 +256,12 @@ func (p *chatPanel) updStatus() {
 	if n == 0 {
 		t += " (ищу в сети; можно добавить адрес вручную)"
 	}
+	if p.kind != "lan" {
+		t = fmt.Sprintf("Серверов на связи: %d из %d", n, len(defaultRelaysFor(p.node)))
+		if n == 0 {
+			t += " (подключаюсь; соединения идут по настройкам вкладки «Прокси»)"
+		}
+	}
 	_ = p.status.SetText(t)
 }
 
@@ -245,7 +286,13 @@ func (p *chatPanel) saveCfg() {
 		}
 	}
 	p.cfg.Kinds[p.kind] = kc
-	_ = saveChatCfg(p.cfg)
+	// обе вкладки чата пишут один файл: перечитываем его и меняем только свою часть
+	c, _ := loadChatCfgRaw()
+	c.Kinds[p.kind] = kc
+	if p.kind != "lan" {
+		c.NetKey = p.cfg.NetKey
+	}
+	_ = saveChatCfg(c)
 }
 
 func (p *chatPanel) order() []string {
@@ -301,7 +348,7 @@ func (p *chatPanel) addRoomDialog() {
 	if label == "" {
 		label = "Комната"
 	}
-	if len([]rune(pw)) < 8 {
+	if min := map[bool]int{true: 8, false: 12}[p.kind == "lan"]; len([]rune(pw)) < min {
 		walk.MsgBox(p.mw, "Комната", "Короткий пароль легко подобрать, пока сообщения хранятся на устройствах. Для рабочих разговоров это допустимо; для важного используйте длинный пароль.", walk.MsgBoxIconInformation)
 	}
 	p.openRoom(label, pw, false, true)
@@ -346,13 +393,13 @@ func (p *chatPanel) rescan() {
 	p.ensureStarted()
 	_ = p.status.SetText("Поиск устройств...")
 	go func() {
-		for {
-			if p.node != nil && p.node.ln != nil {
-				break
-			}
+		for i := 0; i < 50 && (p.lan == nil || p.lan.ln == nil); i++ {
 			time.Sleep(200 * time.Millisecond)
 		}
-		lines := p.node.Scan(2 * time.Second)
+		if p.lan == nil || p.lan.ln == nil {
+			return
+		}
+		lines := p.lan.Scan(2 * time.Second)
 		p.mw.Synchronize(func() {
 			p.updStatus()
 			showTextDialog(p.mw, "Поиск устройств", strings.Join(lines, "\n"))
@@ -378,6 +425,13 @@ func showTextDialog(owner walk.Form, title, text string) {
 func (p *chatPanel) showPeers() {
 	p.ensureStarted()
 	var sb strings.Builder
+	if p.kind != "lan" {
+		sb.WriteString("Серверы Nostr, через которые идут сообщения этого чата.\nСоединение идёт напрямую или через прокси - как настроено на вкладке «Прокси».\n\n")
+		sb.WriteString(strings.Join(p.node.PeerInfo(), "\n"))
+		sb.WriteString("\n\nСвой список серверов: файл crocau-chat\\relays.txt (по одному адресу wss://... в строке), затем перезапуск программы.")
+		showTextDialog(p.mw, "Серверы интернет-чата", sb.String())
+		return
+	}
 	sb.WriteString("Этот компьютер: " + p.node.Name() + "  " + strings.Join(localIPv4s(), ", ") + "\n\n")
 	info := p.node.PeerInfo()
 	if len(info) == 0 {
@@ -394,7 +448,10 @@ func (p *chatPanel) addPeerDialog() {
 	if !ok {
 		return
 	}
-	if err := p.node.AddPeer(res[0]); err != nil {
+	if p.lan == nil {
+		return
+	}
+	if err := p.lan.AddPeer(res[0]); err != nil {
 		walk.MsgBox(p.mw, "Адрес", err.Error(), walk.MsgBoxIconWarning)
 	}
 }
@@ -484,11 +541,17 @@ func (p *chatPanel) openRoom(label, pw string, common, selectIt bool) {
 		dlg.Title = "Файлы для отправки в чат"
 		dlg.Filter = "Все файлы (*.*)|*.*"
 		if ok, err := dlg.ShowOpenMultiple(p.mw); err == nil && ok {
-			for _, f := range dlg.FilePaths {
-				if err := p.node.SendFile(r, f); err != nil {
-					walk.MsgBox(p.mw, "Чат", err.Error(), walk.MsgBoxIconWarning)
+			files := append([]string(nil), dlg.FilePaths...)
+			go func() {
+				for _, f := range files {
+					err := p.node.SendFile(r, f, func(s string) { p.mw.Synchronize(func() { _ = pg.info.SetText(s) }) })
+					p.mw.Synchronize(func() {
+						if err != nil {
+							_ = pg.info.SetText("Файл не отправлен: " + err.Error())
+						}
+					})
 				}
-			}
+			}()
 		}
 	})
 	row2, _ := walk.NewComposite(page)
@@ -580,7 +643,7 @@ func (p *chatPanel) downloadMsg(pg *chatPage, m ChatMsg) {
 	if m.File == nil {
 		return
 	}
-	if m.UID == p.cfg.UID {
+	if m.UID == p.node.UserID() {
 		_ = pg.info.SetText("Это ваш собственный файл.")
 		return
 	}
@@ -690,7 +753,7 @@ func (p *chatPanel) refresh(id string, fromNet bool) {
 	msgs := pg.room.Messages()
 	if fromNet && len(msgs) > pg.count && len(msgs) > 0 {
 		last := msgs[len(msgs)-1]
-		if last.UID != p.cfg.UID && !p.viewing(pg) {
+		if last.UID != p.node.UserID() && !p.viewing(pg) {
 			if !pg.unread {
 				pg.unread = true
 				_ = pg.page.SetTitle(pg.room.Label + " •")
