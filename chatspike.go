@@ -266,8 +266,12 @@ func realNetChat() {
 	src := filepath.Join(da, "e2e.bin")
 	data := mustRand(300000)
 	_ = os.WriteFile(src, data, 0o644)
-	var notes []string
-	err := a.SendFile(ra, src, func(s string) { notes = append(notes, s) })
+	t1 := time.Now()
+	err := a.SendFile(ra, src, func(s string) {
+		if !strings.HasPrefix(s, "Загрузка «") {
+			testLogf("E2E file note (%ds): %s", int(time.Since(t1).Seconds()), s)
+		}
+	})
 	if err != nil {
 		testLogf("E2E file upload: FAIL %v", err)
 		return

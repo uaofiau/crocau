@@ -191,7 +191,10 @@ func uploadChain(ctx context.Context, r Route, file, name string, prog func(done
 		}
 		note("Загрузка на " + p.name + "...")
 		c := httpClientVia(r, 2*time.Hour)
-		u, err := p.upload(ctx, c, file, name, size, func(d int64) { prog(d, size) })
+		// на каждый обменник - ограниченное время (иначе зависший сервис блокирует остальные)
+		pctx, pcancel := context.WithTimeout(ctx, 90*time.Second+time.Duration(size/(50*1024))*time.Second)
+		u, err := p.upload(pctx, c, file, name, size, func(d int64) { prog(d, size) })
+		pcancel()
 		if err == nil {
 			return u, p.name + ", хранится ~" + p.keep, nil
 		}
