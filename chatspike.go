@@ -289,7 +289,10 @@ func realNetChat() {
 		testLogf("E2E file message not received")
 		return
 	}
-	p, err := b.Download(context.Background(), *fm, filepath.Join(db, "dl"), nil)
+	testLogf("E2E file message received: link=%s size=%d", fm.Link, fm.Size)
+	dctx, dcancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer dcancel()
+	p, err := b.Download(dctx, *fm, filepath.Join(db, "dl"), nil)
 	if err != nil {
 		testLogf("E2E file download: FAIL %v", err)
 		return
