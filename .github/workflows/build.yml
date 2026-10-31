@@ -98,6 +98,7 @@ jobs:
           $p = Start-Process -FilePath "$PWD\crocau.exe" -ArgumentList '--selftest' -Wait -PassThru
           $out = ""
           if (Test-Path $env:CROCAU_TESTLOG) { $out = Get-Content $env:CROCAU_TESTLOG -Raw -Encoding UTF8 }
+          if (Test-Path "$PWD\chattest.err") { $err = Get-Content "$PWD\chattest.err" -Raw -Encoding UTF8; if ($err) { $out = $out + "`r`nSTDERR:`r`n" + $err.Substring(0, [Math]::Min(3000, $err.Length)) } }
           Write-Host $out
           $msg = $out -replace "`r?`n", "%0A"
           if ($p.ExitCode -ne 0 -or $out -notmatch "SELFTEST PASSED") { Write-Host "::error title=selftest::exit=$($p.ExitCode) $msg"; exit 1 } else { Write-Host "::notice title=selftest::$msg" }
@@ -157,7 +158,7 @@ jobs:
         timeout-minutes: 5
         run: |
           $env:CROCAU_TESTLOG = "$PWD\chattest.log"
-          $p = Start-Process -FilePath "$PWD\crocau.exe" -ArgumentList '--chattest' -PassThru
+          $p = Start-Process -FilePath "$PWD\crocau.exe" -ArgumentList '--chattest' -PassThru -RedirectStandardError "$PWD\chattest.err"
           $done = $p.WaitForExit(200000)
           if ($done) { $code = $p.ExitCode } else { $code = 99 }
           Get-Process crocau -ErrorAction SilentlyContinue | Stop-Process -Force
