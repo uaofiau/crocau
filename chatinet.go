@@ -645,6 +645,9 @@ func (n *NetChat) SendFile(r *ChatRoom, path string, note func(string)) error {
 }
 
 func (n *NetChat) Download(ctx context.Context, f ChatFile, destDir string, progress func(done, total int64)) (string, error) {
+	if progress == nil {
+		progress = func(int64, int64) {}
+	}
 	if f.Link == "" || f.Key == "" {
 		return "", errors.New("в сообщении нет ссылки на файл")
 	}
