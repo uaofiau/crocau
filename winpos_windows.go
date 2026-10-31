@@ -50,7 +50,9 @@ func restoreWindowGeom(mw *walk.MainWindow, minW, minH int) {
 	if !ok {
 		return
 	}
-	hm := win.MonitorFromPoint(win.POINT{X: int32(g.X + g.W/2), Y: int32(g.Y + 15)}, win.MONITOR_DEFAULTTONEAREST)
+	// сначала ставим окно на сохранённое место, затем смотрим, какой монитор ему ближайший, и вписываем в него
+	win.SetWindowPos(mw.Handle(), 0, int32(g.X), int32(g.Y), int32(g.W), int32(g.H), win.SWP_NOZORDER|win.SWP_NOACTIVATE)
+	hm := win.MonitorFromWindow(mw.Handle(), win.MONITOR_DEFAULTTONEAREST)
 	var mi win.MONITORINFO
 	mi.CbSize = uint32(unsafe.Sizeof(mi))
 	if hm == 0 || !win.GetMonitorInfo(hm, &mi) {
