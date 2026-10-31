@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -229,7 +231,71 @@ func truncate(s string, n int) string {
 	return s
 }
 
+// realNetChat - сквозная проверка интернет-чата на настоящих серверах и обменниках.
+func realNetChat() {
+	testLogf("CA bundle embedded: %d bytes, pool=%v", len(embeddedCA), fallbackRoots() != nil)
+	get := func() Settings { return Settings{ProxyMode: modeDirect} }
+	mk := func(name string) (*NetChat, string) {
+		d, _ := os.MkdirTemp("", "crocau-e2e")
+		n, _ := NewNetChat(d, newNetKey(), name, get)
+		_ = n.Start()
+		return n, d
+	}
+	pw := "crocau-ci-" + randHex(6)
+	a, da := mk("A")
+	defer os.RemoveAll(da)
+	defer a.Stop()
+	ra, _ := a.AddRoom("e2e", pw)
+	okConn := waitFor(25*time.Second, func() bool { return a.PeerCount() >= 2 })
+	testLogf("E2E relays connected: %d of %d (waited for >=2: %v)", a.PeerCount(), a.RelayTotal(), okConn)
+	for _, l := range a.PeerInfo() {
+		testLogf("  %s", l)
+	}
+	_ = a.SendText(ra, "ci-hello")
+	time.Sleep(4 * time.Second)
+	b, db := mk("B")
+	defer os.RemoveAll(db)
+	defer b.Stop()
+	t0 := time.Now()
+	rb, _ := b.AddRoom("e2e", pw)
+	got := waitFor(30*time.Second, func() bool { return len(lastTexts(rb)) >= 1 })
+	testLogf("E2E late member got history from relays: %v (%d ms)", got, time.Since(t0).Milliseconds())
+	_ = b.SendText(rb, "ci-reply")
+	testLogf("E2E live reply reaches first member: %v", waitFor(20*time.Second, func() bool { return len(lastTexts(ra)) >= 2 }))
+	// файл через настоящий обменник (шифруется)
+	src := filepath.Join(da, "e2e.bin")
+	data := mustRand(300000)
+	_ = os.WriteFile(src, data, 0o644)
+	var notes []string
+	err := a.SendFile(ra, src, func(s string) { notes = append(notes, s) })
+	if err != nil {
+		testLogf("E2E file upload: FAIL %v", err)
+		return
+	}
+	var fm *ChatFile
+	waitFor(20*time.Second, func() bool {
+		for _, m := range rb.Messages() {
+			if m.Kind == "file" {
+				fm = m.File
+			}
+		}
+		return fm != nil
+	})
+	if fm == nil {
+		testLogf("E2E file message not received")
+		return
+	}
+	p, err := b.Download(context.Background(), *fm, filepath.Join(db, "dl"), nil)
+	if err != nil {
+		testLogf("E2E file download: FAIL %v", err)
+		return
+	}
+	back, _ := os.ReadFile(p)
+	testLogf("E2E file via exchanger (encrypted) round trip: %v  link=%s", string(back) == string(data), fm.Link)
+}
+
 func chatSpike() int {
+	realNetChat()
 	var wg sync.WaitGroup
 	res := make([]string, len(spikeRelays)+1)
 	sem := make(chan struct{}, 10)
