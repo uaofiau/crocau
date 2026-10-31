@@ -50,8 +50,7 @@ func restoreWindowGeom(mw *walk.MainWindow, minW, minH int) {
 	if !ok {
 		return
 	}
-	rc := win.RECT{Left: int32(g.X), Top: int32(g.Y), Right: int32(g.X + g.W), Bottom: int32(g.Y + g.H)}
-	hm := win.MonitorFromRect(&rc, win.MONITOR_DEFAULTTONEAREST)
+	hm := win.MonitorFromPoint(win.POINT{X: int32(g.X + g.W/2), Y: int32(g.Y + 15)}, win.MONITOR_DEFAULTTONEAREST)
 	var mi win.MONITORINFO
 	mi.CbSize = uint32(unsafe.Sizeof(mi))
 	if hm == 0 || !win.GetMonitorInfo(hm, &mi) {
