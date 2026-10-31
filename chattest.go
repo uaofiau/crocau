@@ -123,14 +123,37 @@ func chatSelfTest() int {
 		_, err = b.Download(context.Background(), fm2, dst, nil)
 		check(err != nil, "CHAT FILE unknown token refused", "")
 	}
-	// история сохраняется на диске и читается после перезапуска
-	b.Stop()
-	b2 := NewChatNode(db, b.UID, "Борис")
-	b2.tcpPort, b2.discPort, b2.allowLoopback, b2.noAutoScan = 39016, 39017, true, true
-	r2, _ := newChatRoom("Общая", chatCommonDefaultPw, b2.histDir())
+	// история сохраняется на диске (читаем файлы работающего узла А так, как это сделал бы новый запуск)
+	r2, _ := newChatRoom("Общая", chatCommonDefaultPw, a.histDir())
 	check(len(lastTexts(r2)) >= 3 && len(r2.Messages()) >= 4, "CHAT HISTORY kept on disk (encrypted) after restart", itoa(len(r2.Messages())))
 	raw, _ := os.ReadFile(r2.path)
 	check(len(raw) > 0 && !containsStr(string(raw), "привет от Бори"), "CHAT HISTORY file has no plaintext", "")
+	// имена соединённых устройств (после переименования)
+	check(waitFor(5*time.Second, func() bool {
+		for _, l := range a.PeerInfo() {
+			if containsStr(l, "Борис") {
+				return true
+			}
+		}
+		return false
+	}), "CHAT PEER LIST (name + IP, updated on rename)", "")
+	// экспорт
+	ex := ra.ExportText()
+	check(containsStr(ex, "привет от Бори") && containsStr(ex, "Борис"), "CHAT EXPORT text", "")
+	// очистка у всех
+	b.ClearAll(rb)
+	check(waitFor(5*time.Second, func() bool { return len(ra.Messages()) == 0 && len(rb.Messages()) == 0 }), "CHAT CLEAR FOR ALL", "")
+	_ = a.SendText(ra, "после очистки")
+	check(waitFor(5*time.Second, func() bool { return len(lastTexts(rb)) == 1 }), "CHAT after clear new messages flow", "")
+	// локальная очистка: старые кадры (например, от собеседника при повторной синхронизации) не возвращаются
+	frames := rb.missingFor(nil, 100)
+	ra.ClearLocal()
+	for _, f := range frames {
+		ra.add(f, true)
+	}
+	check(len(ra.Messages()) == 0 && len(rb.Messages()) == 1, "CHAT CLEAR LOCAL (peer keeps, old frames do not return)", itoa(len(ra.Messages())))
+	r3, _ := newChatRoom("Общая", chatCommonDefaultPw, a.histDir())
+	check(len(r3.Messages()) == 0, "CHAT CLEAR persists after restart", "")
 	return fails
 }
 

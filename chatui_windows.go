@@ -9,7 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf16"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
@@ -18,18 +19,28 @@ import (
 
 // Окно локального чата: сверху имя и общая комната, ниже вкладки комнат с кнопкой «+».
 
+const (
+	emCharFromPos         = 0x00D7
+	emPosFromChar         = 0x00D6
+	emGetFirstVisibleLine = 0x00CE
+	emLineScroll          = 0x00B6
+)
+
 type chatPage struct {
 	room    *ChatRoom
 	pw      string
 	common  bool
 	page    *walk.TabPage
 	te      *walk.TextEdit
-	input   *walk.LineEdit
+	input   *walk.TextEdit
 	filesCB *walk.ComboBox
 	files   []ChatMsg
 	info    *walk.Label
 	unread  bool
 	count   int
+	view    chatView
+	expand  map[string]bool
+	swallow bool // после отправки по Enter убрать перевод строки, который вставит поле ввода
 }
 
 type chatPanel struct {
@@ -48,6 +59,8 @@ type chatPanel struct {
 	nameLE  *walk.LineEdit
 	commonC *walk.CheckBox
 	commonP *walk.LineEdit
+	// onUnread вызывается, когда меняется набор непрочитанных вкладок (мигание значка в трее).
+	onUnread func()
 }
 
 func defaultChatName() string {
@@ -145,6 +158,10 @@ func newChatPanel(mw *walk.MainWindow, host walk.Container, kind string, notify 
 	find, _ := walk.NewPushButton(bar)
 	_ = find.SetText("Найти устройства")
 	find.Clicked().Attach(func() { p.rescan() })
+	peersBtn, _ := walk.NewPushButton(bar)
+	_ = peersBtn.SetText("Устройства")
+	_ = peersBtn.SetToolTipText("Показать устройства на связи: имя и IP-адрес (текст можно скопировать)")
+	peersBtn.Clicked().Attach(func() { p.showPeers() })
 	addr, _ := walk.NewPushButton(bar)
 	_ = addr.SetText("Адрес...")
 	_ = addr.SetToolTipText("Добавить устройство вручную (например, адрес из ZeroTier или другой подсети)")
@@ -338,9 +355,37 @@ func (p *chatPanel) rescan() {
 		lines := p.node.Scan(2 * time.Second)
 		p.mw.Synchronize(func() {
 			p.updStatus()
-			walk.MsgBox(p.mw, "Поиск устройств", strings.Join(lines, "\n"), walk.MsgBoxIconInformation)
+			showTextDialog(p.mw, "Поиск устройств", strings.Join(lines, "\n"))
 		})
 	}()
+}
+
+// showTextDialog показывает текст в окне с возможностью выделить и скопировать.
+func showTextDialog(owner walk.Form, title, text string) {
+	var dlg *walk.Dialog
+	_, _ = (Dialog{
+		AssignTo: &dlg, Title: title, MinSize: Size{Width: 420, Height: 260}, Layout: VBox{},
+		Children: []Widget{
+			TextEdit{ReadOnly: true, VScroll: true, Text: crlf(text)},
+			Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
+				HSpacer{},
+				PushButton{Text: "Закрыть", OnClicked: func() { dlg.Accept() }},
+			}},
+		},
+	}).Run(owner)
+}
+
+func (p *chatPanel) showPeers() {
+	p.ensureStarted()
+	var sb strings.Builder
+	sb.WriteString("Этот компьютер: " + p.node.Name() + "  " + strings.Join(localIPv4s(), ", ") + "\n\n")
+	info := p.node.PeerInfo()
+	if len(info) == 0 {
+		sb.WriteString("Подключённых устройств нет.")
+	} else {
+		sb.WriteString("На связи:\n" + strings.Join(info, "\n"))
+	}
+	showTextDialog(p.mw, "Устройства на связи", sb.String())
 }
 
 func (p *chatPanel) addPeerDialog() {
@@ -354,18 +399,7 @@ func (p *chatPanel) addPeerDialog() {
 	}
 }
 
-func (p *chatPanel) onTabChanged() {
-	i := p.tw.CurrentIndex()
-	if i < 0 {
-		return
-	}
-	for _, pg := range p.pages {
-		if pg.page == p.tw.Pages().At(i) && pg.unread {
-			pg.unread = false
-			_ = pg.page.SetTitle(pg.room.Label)
-		}
-	}
-}
+func (p *chatPanel) onTabChanged() { p.onShown() }
 
 // openRoom добавляет комнату в сеть и вкладку в окно.
 func (p *chatPanel) openRoom(label, pw string, common, selectIt bool) {
@@ -394,9 +428,11 @@ func (p *chatPanel) openRoom(label, pw string, common, selectIt bool) {
 	if bl, ok := row.Layout().(*walk.BoxLayout); ok {
 		_ = bl.SetMargins(walk.Margins{})
 	}
-	pg.input, _ = walk.NewLineEdit(row)
+	pg.input, _ = walk.NewTextEditWithStyle(row, win.WS_VSCROLL)
+	_ = pg.input.SetMinMaxSize(walk.Size{Height: 46}, walk.Size{Height: 64})
 	send, _ := walk.NewPushButton(row)
 	_ = send.SetText("Отправить")
+	_ = send.SetToolTipText("Enter - отправить сообщение, Ctrl+Enter - перенос строки")
 	fb, _ := walk.NewPushButton(row)
 	_ = fb.SetText("Файл...")
 	doSend := func() {
@@ -408,13 +444,40 @@ func (p *chatPanel) openRoom(label, pw string, common, selectIt bool) {
 			walk.MsgBox(p.mw, "Чат", err.Error(), walk.MsgBoxIconWarning)
 			return
 		}
+		pg.swallow = true
 		_ = pg.input.SetText("")
 	}
-	send.Clicked().Attach(doSend)
+	send.Clicked().Attach(func() { doSend(); pg.swallow = false })
 	pg.input.KeyDown().Attach(func(key walk.Key) {
-		if key == walk.KeyReturn {
-			doSend()
+		if key != walk.KeyReturn {
+			return
 		}
+		if uint16(win.GetKeyState(win.VK_CONTROL))&0x8000 != 0 {
+			// Ctrl+Enter - перенос строки; если поле само его не вставит, вставляем сами
+			before := pg.input.TextLength()
+			time.AfterFunc(120*time.Millisecond, func() {
+				p.mw.Synchronize(func() {
+					if pg.input.TextLength() == before {
+						pg.input.ReplaceSelectedText("\r\n", true)
+					}
+				})
+			})
+			return
+		}
+		doSend()
+	})
+	pg.input.TextChanged().Attach(func() {
+		if !pg.swallow {
+			return
+		}
+		t := pg.input.Text()
+		if strings.TrimSpace(t) == "" {
+			if t != "" {
+				_ = pg.input.SetText("")
+			}
+			return
+		}
+		pg.swallow = false
 	})
 	fb.Clicked().Attach(func() {
 		dlg := new(walk.FileDialog)
@@ -439,7 +502,58 @@ func (p *chatPanel) openRoom(label, pw string, common, selectIt bool) {
 	dl, _ := walk.NewPushButton(row2)
 	_ = dl.SetText("Скачать")
 	dl.Clicked().Attach(func() { p.download(pg) })
+	row3, _ := walk.NewComposite(page)
+	row3.SetLayout(walk.NewHBoxLayout())
+	if bl, ok := row3.Layout().(*walk.BoxLayout); ok {
+		_ = bl.SetMargins(walk.Margins{})
+	}
+	clr, _ := walk.NewPushButton(row3)
+	_ = clr.SetText("Очистить чат")
+	_ = clr.SetToolTipText("Очистить историю этой комнаты только на этом компьютере")
+	clr.Clicked().Attach(func() {
+		if walk.MsgBox(p.mw, "Очистить чат", "Очистить историю комнаты «"+r.Label+"» на этом компьютере?", walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) == walk.DlgCmdYes {
+			r.ClearLocal()
+			pg.expand = map[string]bool{}
+			p.refresh(r.ID, false)
+		}
+	})
+	clrAll, _ := walk.NewPushButton(row3)
+	_ = clrAll.SetText("Очистить чат у всех")
+	_ = clrAll.SetToolTipText("Очистить историю комнаты у всех участников (у тех, кто сейчас не в сети - при следующем подключении)")
+	clrAll.Clicked().Attach(func() {
+		if walk.MsgBox(p.mw, "Очистить чат у всех", "Очистить историю комнаты «"+r.Label+"» у ВСЕХ участников?", walk.MsgBoxYesNo|walk.MsgBoxIconWarning) == walk.DlgCmdYes {
+			p.node.ClearAll(r)
+			pg.expand = map[string]bool{}
+			p.refresh(r.ID, false)
+		}
+	})
+	exp, _ := walk.NewPushButton(row3)
+	_ = exp.SetText("Экспорт в txt")
+	exp.Clicked().Attach(func() {
+		dlg := new(walk.FileDialog)
+		dlg.Title = "Сохранить чат"
+		dlg.Filter = "Текст (*.txt)|*.txt"
+		dlg.FilePath = "chat-" + safeFileName(r.Label) + ".txt"
+		if ok, err := dlg.ShowSave(p.mw); err == nil && ok {
+			path := dlg.FilePath
+			if !strings.Contains(strings.ToLower(path), ".txt") {
+				path += ".txt"
+			}
+			if err := os.WriteFile(path, []byte("\xEF\xBB\xBF"+r.ExportText()), 0o644); err != nil {
+				walk.MsgBox(p.mw, "Экспорт", err.Error(), walk.MsgBoxIconWarning)
+			} else {
+				_ = pg.info.SetText("Чат сохранён: " + path)
+			}
+		}
+	})
 	pg.info, _ = walk.NewLabel(page)
+	_ = pg.info.SetText("Клик по ссылке открывает её (длинная сначала раскрывается), по [файл...] - скачивает, по [… развернуть] - показывает всё сообщение.")
+	pg.expand = map[string]bool{}
+	pg.te.MouseUp().Attach(func(x, y int, button walk.MouseButton) {
+		if button == walk.LeftButton {
+			p.onHistoryClick(pg, x, y)
+		}
+	})
 	// первой идёт общая комната
 	idx := p.tw.Pages().Len()
 	if common {
@@ -459,7 +573,13 @@ func (p *chatPanel) download(pg *chatPage) {
 	if i < 0 || i >= len(pg.files) {
 		return
 	}
-	m := pg.files[i]
+	p.downloadMsg(pg, pg.files[i])
+}
+
+func (p *chatPanel) downloadMsg(pg *chatPage, m ChatMsg) {
+	if m.File == nil {
+		return
+	}
 	if m.UID == p.cfg.UID {
 		_ = pg.info.SetText("Это ваш собственный файл.")
 		return
@@ -487,29 +607,69 @@ func (p *chatPanel) download(pg *chatPage) {
 	}()
 }
 
-// refresh перерисовывает историю комнаты; если пришли новые сообщения - отмечает вкладку и показывает уведомление.
-func (p *chatPanel) refresh(id string, fromNet bool) {
-	pg := p.pages[id]
-	if pg == nil {
+// onHistoryClick: клик по ссылке, файлу или «развернуть» в истории (выделение мышью не считается кликом).
+func (p *chatPanel) onHistoryClick(pg *chatPage, x, y int) {
+	if s, e := pg.te.TextSelection(); s != e {
 		return
 	}
+	pos := int(pg.te.SendMessage(emCharFromPos, 0, uintptr(uint32(uint16(y))<<16|uint32(uint16(x)))) & 0xFFFF)
+	// клик должен быть именно по тексту, а не по пустому месту справа от строки
+	pp := uint32(pg.te.SendMessage(emPosFromChar, uintptr(pos), 0))
+	px, py := int(int16(pp&0xFFFF)), int(int16(pp>>16))
+	if dx, dy := x-px, y-py; dx < -4 || dx > 26 || dy < -4 || dy > 22 {
+		return
+	}
+	seg := pg.view.segAt(pos)
+	if seg == nil {
+		return
+	}
+	switch seg.Kind {
+	case "expand", "collapse":
+		pg.expand[seg.Key] = !pg.expand[seg.Key]
+		p.refreshKeep(pg)
+	case "link":
+		if u16len(seg.URL) > chatLinkMax && !pg.expand[seg.Key] {
+			pg.expand[seg.Key] = true
+			p.refreshKeep(pg)
+			return
+		}
+		verb, _ := windows.UTF16PtrFromString("open")
+		file, _ := windows.UTF16PtrFromString(seg.URL)
+		_ = windows.ShellExecute(0, verb, file, nil, nil, windows.SW_SHOWNORMAL)
+	case "file":
+		for _, m := range pg.files {
+			if m.ID == seg.MsgID {
+				p.downloadMsg(pg, m)
+			}
+		}
+	}
+}
+
+// refreshKeep перерисовывает историю, сохраняя прокрутку.
+func (p *chatPanel) refreshKeep(pg *chatPage) {
+	line := int(pg.te.SendMessage(emGetFirstVisibleLine, 0, 0))
+	p.render(pg, false)
+	pg.te.SendMessage(emLineScroll, 0, uintptr(line))
+}
+
+// render выводит историю в поле; toEnd - прокрутить к последнему сообщению.
+func (p *chatPanel) render(pg *chatPage, toEnd bool) {
 	msgs := pg.room.Messages()
-	var sb strings.Builder
+	pg.view = renderChat(msgs, pg.expand)
 	pg.files = pg.files[:0]
 	var names []string
 	for _, m := range msgs {
-		sb.WriteString(m.FormatLine())
-		sb.WriteString("\r\n")
 		if m.Kind == "file" && m.File != nil {
 			pg.files = append(pg.files, m)
 			names = append(names, m.File.Name+" ("+humanSize(m.File.Size)+") - "+m.Name)
 		}
 	}
-	text := sb.String()
-	_ = pg.te.SetText(text)
-	n := len(utf16.Encode([]rune(text)))
-	pg.te.SetTextSelection(n, n)
-	pg.te.SendMessage(win.EM_SCROLLCARET, 0, 0)
+	_ = pg.te.SetText(pg.view.Text)
+	if toEnd {
+		n := u16len(pg.view.Text)
+		pg.te.SetTextSelection(n, n)
+		pg.te.SendMessage(win.EM_SCROLLCARET, 0, 0)
+	}
 	cur := pg.filesCB.CurrentIndex()
 	_ = pg.filesCB.SetModel(names)
 	if len(names) > 0 {
@@ -518,24 +678,85 @@ func (p *chatPanel) refresh(id string, fromNet bool) {
 		}
 		_ = pg.filesCB.SetCurrentIndex(cur)
 	}
+}
+
+// refresh перерисовывает историю комнаты; если пришли новые сообщения - отмечает вкладку и показывает уведомление.
+func (p *chatPanel) refresh(id string, fromNet bool) {
+	pg := p.pages[id]
+	if pg == nil {
+		return
+	}
+	p.render(pg, true)
+	msgs := pg.room.Messages()
 	if fromNet && len(msgs) > pg.count && len(msgs) > 0 {
 		last := msgs[len(msgs)-1]
-		if last.UID != p.cfg.UID {
-			cur := p.tw.CurrentIndex()
-			if cur < 0 || p.tw.Pages().At(cur) != pg.page {
+		if last.UID != p.cfg.UID && !p.viewing(pg) {
+			if !pg.unread {
 				pg.unread = true
 				_ = pg.page.SetTitle(pg.room.Label + " •")
 			}
+			txt := last.Text
+			if last.Kind == "file" && last.File != nil {
+				txt = "[файл] " + last.File.Name
+			}
 			if p.notify != nil {
-				txt := last.Text
-				if last.Kind == "file" && last.File != nil {
-					txt = "[файл] " + last.File.Name
-				}
 				p.notify("Чат: "+pg.room.Label, last.Name+": "+truncRunes(txt, 80))
+			}
+			if p.onUnread != nil {
+				p.onUnread()
 			}
 		}
 	}
 	pg.count = len(msgs)
+}
+
+// viewing: пользователь прямо сейчас видит эту комнату (окно на экране, вкладка чата и вкладка комнаты открыты).
+func (p *chatPanel) viewing(pg *chatPage) bool {
+	if p.isHere == nil || !p.isHere() {
+		return false
+	}
+	i := p.tw.CurrentIndex()
+	return i >= 0 && p.tw.Pages().At(i) == pg.page
+}
+
+// HasUnread - есть ли непрочитанные комнаты.
+func (p *chatPanel) HasUnread() bool {
+	for _, pg := range p.pages {
+		if pg.unread {
+			return true
+		}
+	}
+	return false
+}
+
+// FocusUnread открывает первую (по порядку вкладок) комнату с непрочитанными сообщениями.
+func (p *chatPanel) FocusUnread() {
+	for i := 0; i < p.tw.Pages().Len(); i++ {
+		for _, pg := range p.pages {
+			if pg.page == p.tw.Pages().At(i) && pg.unread {
+				_ = p.tw.SetCurrentIndex(i)
+				p.onShown()
+				return
+			}
+		}
+	}
+}
+
+// onShown вызывается, когда пользователь мог увидеть текущую комнату: снимает отметку «непрочитано».
+func (p *chatPanel) onShown() {
+	i := p.tw.CurrentIndex()
+	if i < 0 {
+		return
+	}
+	for _, pg := range p.pages {
+		if pg.page == p.tw.Pages().At(i) && pg.unread && p.viewing(pg) {
+			pg.unread = false
+			_ = pg.page.SetTitle(pg.room.Label)
+			if p.onUnread != nil {
+				p.onUnread()
+			}
+		}
+	}
 }
 
 func truncRunes(s string, n int) string {

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -103,6 +104,8 @@ type ChatRoom struct {
 	blobs map[string]chatFrame
 	names map[string]string
 	nameT map[string]int64
+	// clearedTS - всё, что старше этого времени, считается очищенным (очистка чата локально или у всех).
+	clearedTS int64
 }
 
 const chatMaxHistory = 5000
@@ -121,6 +124,9 @@ func newChatRoom(label, pw, histDir string) (*ChatRoom, error) {
 		blobs: map[string]chatFrame{}, names: map[string]string{}, nameT: map[string]int64{}}
 	if histDir != "" {
 		r.path = filepath.Join(histDir, r.ID+".log")
+		if b, err := os.ReadFile(r.clrPath()); err == nil {
+			r.clearedTS, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		}
 		r.loadHistory()
 	}
 	return r, nil
@@ -169,6 +175,18 @@ func (r *ChatRoom) add(f chatFrame, persist bool) (ChatMsg, bool) {
 		return ChatMsg{}, false
 	}
 	r.blobs[f.ID] = f
+	if m.Kind == "clear" {
+		if m.TS < r.clearedTS {
+			return ChatMsg{}, false
+		}
+		if m.TS > r.clearedTS {
+			r.clearedTS = m.TS
+			r.dropOlderLocked(m.TS, f.ID)
+			r.saveClrLocked()
+		}
+	} else if m.TS <= r.clearedTS {
+		return ChatMsg{}, false
+	}
 	i := sort.Search(len(r.msgs), func(i int) bool { return r.msgs[i].TS > m.TS })
 	r.msgs = append(r.msgs, ChatMsg{})
 	copy(r.msgs[i+1:], r.msgs[i:])
@@ -218,13 +236,73 @@ func (r *ChatRoom) loadHistory() {
 	}
 }
 
+func (r *ChatRoom) clrPath() string { return strings.TrimSuffix(r.path, ".log") + ".clr" }
+
+func (r *ChatRoom) saveClrLocked() {
+	if r.path != "" {
+		_ = os.WriteFile(r.clrPath(), []byte(strconv.FormatInt(r.clearedTS, 10)), 0o600)
+	}
+}
+
+// dropOlderLocked удаляет сообщения не новее ts (кроме keepID) и переписывает файл истории.
+func (r *ChatRoom) dropOlderLocked(ts int64, keepID string) {
+	var keep []ChatMsg
+	for _, m := range r.msgs {
+		if m.TS > ts || m.ID == keepID {
+			keep = append(keep, m)
+		} else {
+			delete(r.blobs, m.ID)
+		}
+	}
+	r.msgs = keep
+	r.rewriteLocked()
+}
+
+func (r *ChatRoom) rewriteLocked() {
+	if r.path == "" {
+		return
+	}
+	var out []byte
+	for _, m := range r.msgs {
+		jb, _ := json.Marshal(r.blobs[m.ID])
+		out = append(append(out, jb...), '\n')
+	}
+	_ = os.WriteFile(r.path, out, 0o600)
+}
+
+// ClearLocal очищает историю только на этом компьютере (старые сообщения от других больше не вернутся).
+func (r *ChatRoom) ClearLocal() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clearedTS = nowMs()
+	r.msgs = nil
+	r.blobs = map[string]chatFrame{}
+	r.saveClrLocked()
+	r.rewriteLocked()
+}
+
+// ExportText - история в виде обычного текста.
+func (r *ChatRoom) ExportText() string {
+	var sb strings.Builder
+	sb.WriteString("Чат: " + r.Label + "\r\n\r\n")
+	for _, m := range r.Messages() {
+		t := time.Unix(m.TS/1000, 0).Format("2006-01-02 15:04:05")
+		body := strings.ReplaceAll(strings.ReplaceAll(m.Text, "\r\n", "\n"), "\n", "\r\n")
+		if m.Kind == "file" && m.File != nil {
+			body = "[файл] " + m.File.Name + " (" + humanSize(m.File.Size) + ")"
+		}
+		sb.WriteString(t + "  " + m.Name + ": " + body + "\r\n")
+	}
+	return sb.String()
+}
+
 // Messages возвращает копию истории (без служебных "hi") с актуальными именами авторов.
 func (r *ChatRoom) Messages() []ChatMsg {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]ChatMsg, 0, len(r.msgs))
 	for _, m := range r.msgs {
-		if m.Kind == "hi" {
+		if m.Kind == "hi" || m.Kind == "clear" {
 			continue
 		}
 		if n := r.names[m.UID]; n != "" {

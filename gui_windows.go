@@ -18,6 +18,9 @@ import (
 	"github.com/lxn/win"
 )
 
+// appVersion - версия программы (показывается внизу окна).
+const appVersion = "1.7"
+
 func crlf(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\n", "\r\n")
 }
@@ -649,6 +652,40 @@ func guiMain(test bool) int {
 		}
 	}
 	_ = notify
+	// мигание значка в трее, пока есть непрочитанные сообщения чата
+	var blinkStop chan struct{}
+	updBlink := func() {
+		want := trayHidden && ni != nil && chatLan != nil && chatLan.HasUnread()
+		if want && blinkStop == nil {
+			stop := make(chan struct{})
+			blinkStop = stop
+			go func() {
+				vis := true
+				t := time.NewTicker(600 * time.Millisecond)
+				defer t.Stop()
+				for {
+					select {
+					case <-stop:
+						return
+					case <-t.C:
+						vis = !vis
+						v := vis
+						mw.Synchronize(func() {
+							if trayHidden && ni != nil && blinkStop == stop {
+								_ = ni.SetVisible(v)
+							}
+						})
+					}
+				}
+			}()
+		} else if !want && blinkStop != nil {
+			close(blinkStop)
+			blinkStop = nil
+			if trayHidden && ni != nil {
+				_ = ni.SetVisible(true)
+			}
+		}
+	}
 	restoreFromTray := func() {
 		if ni != nil {
 			_ = ni.SetVisible(false)
@@ -657,6 +694,10 @@ func guiMain(test bool) int {
 		mw.SetVisible(true)
 		win.ShowWindow(mw.Handle(), win.SW_RESTORE)
 		win.SetForegroundWindow(mw.Handle())
+		if chatLan != nil {
+			chatLan.onShown()
+		}
+		updBlink()
 	}
 	hideToTray := func() error {
 		if ni == nil {
@@ -667,6 +708,7 @@ func guiMain(test bool) int {
 		}
 		trayHidden = true
 		mw.SetVisible(false)
+		updBlink()
 		return nil
 	}
 
@@ -1461,6 +1503,7 @@ func guiMain(test bool) int {
 						}
 					}},
 					HSpacer{},
+					Label{Text: "v" + appVersion, ToolTipText: "Версия программы"},
 					PushButton{AssignTo: &topBtn, Text: "Поверх всех", ToolTipText: "Держать окно поверх остальных - удобно перетаскивать в него файлы. Повторное нажатие отключает", OnClicked: func() {
 						onTop = !onTop
 						after := win.HWND_NOTOPMOST
@@ -1499,14 +1542,19 @@ func guiMain(test bool) int {
 
 	// локальный чат
 	if cp, err := newChatPanel(mw, chatLanHost, "lan", notify, func() string { return resolveOutDir(outLE.Text()) },
-		func() bool { return !trayHidden }); err == nil {
+		func() bool {
+			i := tabs.CurrentIndex()
+			return !trayHidden && mw.Visible() && !win.IsIconic(mw.Handle()) && i >= 0 && tabs.Pages().At(i).Title() == "Чат локально"
+		}); err == nil {
 		chatLan = cp
+		cp.onUnread = updBlink
 		if kc := cp.cfg.Kinds["lan"]; kc.Common || len(kc.Rooms) > 0 {
 			mw.Synchronize(chatLan.ensureStarted)
 		}
 		tabs.CurrentIndexChanged().Attach(func() {
 			if i := tabs.CurrentIndex(); i >= 0 && tabs.Pages().At(i).Title() == "Чат локально" {
 				chatLan.ensureStarted()
+				chatLan.onShown()
 			}
 		})
 	}
@@ -1535,7 +1583,17 @@ func guiMain(test bool) int {
 		})
 		_ = ni.ContextMenu().Actions().Add(show)
 		_ = ni.ContextMenu().Actions().Add(quit)
-		ni.MessageClicked().Attach(restoreFromTray)
+		ni.MessageClicked().Attach(func() {
+			restoreFromTray()
+			if chatLan != nil && chatLan.HasUnread() {
+				for i := 0; i < tabs.Pages().Len(); i++ {
+					if tabs.Pages().At(i).Title() == "Чат локально" {
+						_ = tabs.SetCurrentIndex(i)
+					}
+				}
+				chatLan.FocusUnread()
+			}
+		})
 		ni.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
 			if button == walk.LeftButton {
 				restoreFromTray()
@@ -1590,6 +1648,9 @@ func guiMain(test bool) int {
 		}
 	}
 
+	if !test {
+		restoreWindowGeom(mw, 650, 600)
+	}
 	win.DragAcceptFiles(mw.Handle(), true)
 	mw.DropFiles().Attach(func(files []string) { addPaths(files) })
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
@@ -1601,6 +1662,9 @@ func guiMain(test bool) int {
 		exch.Stop()
 		if chatLan != nil {
 			chatLan.stop()
+		}
+		if !test {
+			saveWindowGeom(mw)
 		}
 		if curHost != nil {
 			curHost.Close()

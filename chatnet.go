@@ -34,6 +34,8 @@ type chatWire struct {
 	TS     int64    `json:"ts,omitempty"`
 	C      string   `json:"c,omitempty"`
 	Tok    string   `json:"tok,omitempty"`
+	U      string   `json:"u,omitempty"`
+	N      string   `json:"n,omitempty"`
 	OK     bool     `json:"ok,omitempty"`
 	Size   int64    `json:"size,omitempty"`
 }
@@ -50,6 +52,8 @@ type chatConn struct {
 	c      net.Conn
 	out    bool
 	id     string
+	uid    string
+	name   string
 	remote string
 	addrs  []string
 	wmu    sync.Mutex
@@ -321,6 +325,12 @@ func (n *ChatNode) Rename(name string) {
 		rs = append(rs, r)
 	}
 	n.mu.Unlock()
+	n.mu.Lock()
+	conns := n.connList()
+	n.mu.Unlock()
+	for _, cc := range conns {
+		_ = cc.send(chatWire{T: "who", U: n.UID, N: name})
+	}
 	for _, r := range rs {
 		n.post(r, ChatMsg{Kind: "hi"})
 		if n.OnUpdate != nil {
@@ -354,6 +364,26 @@ func (n *ChatNode) isOwn(addr string) bool {
 		}
 	}
 	return false
+}
+
+// ClearAll очищает комнату у всех участников, которые сейчас на связи или подключатся позже.
+func (n *ChatNode) ClearAll(r *ChatRoom) { n.post(r, ChatMsg{Kind: "clear"}) }
+
+// PeerInfo - строки «имя  адрес» подключённых устройств.
+func (n *ChatNode) PeerInfo() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	var l []string
+	for _, p := range n.peers {
+		host, _, _ := net.SplitHostPort(p.remote)
+		name := p.name
+		if name == "" {
+			name = "?"
+		}
+		l = append(l, name+"  "+host)
+	}
+	sort.Strings(l)
+	return l
 }
 
 // ---------- соседи ----------
@@ -477,7 +507,7 @@ func minInt(a, b int) int {
 func (n *ChatNode) helloWire() chatWire {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	w := chatWire{T: "hello", ID: n.nodeID, Port: n.tcpPort, Addrs: n.ownAddrs(), Rooms: n.roomIDs()}
+	w := chatWire{T: "hello", ID: n.nodeID, U: n.UID, N: n.name, Port: n.tcpPort, Addrs: n.ownAddrs(), Rooms: n.roomIDs()}
 	seen := map[string]bool{}
 	for _, p := range n.peers {
 		for _, a := range p.addrs {
@@ -534,6 +564,7 @@ func (n *ChatNode) serveConn(c net.Conn, out bool) {
 		cc.remote = net.JoinHostPort(host, itoa(first.Port))
 	}
 	cc.id = first.ID
+	cc.uid, cc.name = first.U, first.N
 	cc.addrs = first.Addrs
 	n.mu.Lock()
 	if old := n.peers[cc.id]; old != nil {
@@ -572,6 +603,13 @@ func (n *ChatNode) serveConn(c net.Conn, out bool) {
 			return
 		}
 		switch w.T {
+		case "who":
+			n.mu.Lock()
+			cc.uid, cc.name = w.U, w.N
+			n.mu.Unlock()
+			if n.OnPeers != nil {
+				n.OnPeers()
+			}
 		case "rooms":
 			n.mu.Lock()
 			cc.rooms = map[string]bool{}
