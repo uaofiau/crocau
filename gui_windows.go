@@ -374,6 +374,20 @@ func guiMain(test bool) int {
 	}
 	fileModel := &fileListModel{items: &items}
 	refreshList := func() { fileModel.PublishItemsReset() }
+	// удаляем выделенные строки по одной, с конца, чтобы номера не сдвигались
+	removeSelected := func() {
+		sel := append([]int(nil), fileList.SelectedIndexes()...)
+		sort.Sort(sort.Reverse(sort.IntSlice(sel)))
+		last := -1
+		for _, i := range sel {
+			if i < 0 || i >= len(items) || i == last {
+				continue
+			}
+			last = i
+			items = append(items[:i], items[i+1:]...)
+			fileModel.PublishItemsRemoved(i, i)
+		}
+	}
 	// файлы, брошенные на вкладку «Обмен», копируются в папку Share и уходят на устройства как обычные изменения
 	dropToShare := func(ps []string) {
 		dir := resolveShareDir(exchDirLE.Text())
@@ -1226,20 +1240,7 @@ func guiMain(test bool) int {
 													addPaths([]string{dlg.FilePath})
 												}
 											}},
-											PushButton{Text: "Убрать", OnClicked: func() {
-												// удаляем выделенные строки по одной, с конца, чтобы номера не сдвигались
-												sel := append([]int(nil), fileList.SelectedIndexes()...)
-												sort.Sort(sort.Reverse(sort.IntSlice(sel)))
-												last := -1
-												for _, i := range sel {
-													if i < 0 || i >= len(items) || i == last {
-														continue
-													}
-													last = i
-													items = append(items[:i], items[i+1:]...)
-													fileModel.PublishItemsRemoved(i, i)
-												}
-											}},
+											PushButton{Text: "Убрать", OnClicked: removeSelected},
 											PushButton{Text: "Очистить", OnClicked: func() {
 												items = nil
 												refreshList()
@@ -1823,7 +1824,13 @@ func guiMain(test bool) int {
 					}
 					return len(histTexts), histTexts[0]
 				},
-				exchLog: func() string { return exch.lastFailText() + "\n" + exchText.Text() },
+				clearList: func() { items = nil; refreshList() },
+				removeAt: func(idx []int) {
+					_ = fileList.SetSelectedIndexes(idx)
+					removeSelected()
+				},
+				listItems: func() []string { return append([]string(nil), items...) },
+				exchLog:   func() string { return exch.lastFailText() + "\n" + exchText.Text() },
 				trayHide: func() string {
 					if err := hideToTray(); err != nil {
 						return err.Error()
@@ -2002,6 +2009,9 @@ type guiHooks struct {
 	exchRunning                                                     func() bool
 	exchHistory                                                     func() (int, string)
 	exchLog                                                         func() string
+	removeAt                                                        func([]int)
+	clearList                                                       func()
+	listItems                                                       func() []string
 	trayHide                                                        func() string
 }
 
@@ -2161,6 +2171,24 @@ func guiTestSteps(mw *walk.MainWindow, busy func() bool, ui func(func()), h guiH
 		fails++
 		testLogf("GUI RECEIVE text+file: FAIL text=%q", got)
 		testLogf("%s", snd.Log())
+	}
+	// 2b) удаление нескольких выделенных файлов из списка отправки (выделение как при Ctrl+щелчке)
+	{
+		ui(func() { h.clearList() })
+		ui(func() { h.addFiles([]string{"a1", "a2", "a3", "a4", "a5"}) })
+		ui(func() { h.removeAt([]int{0, 2, 3}) })
+		var left []string
+		ui(func() { left = h.listItems() })
+		ui(func() { h.removeAt([]int{0, 1, 7}) })
+		var left2 []string
+		ui(func() { left2 = h.listItems() })
+		if len(left) == 2 && left[0] == "a2" && left[1] == "a5" && len(left2) == 0 {
+			testLogf("GUI REMOVE several selected files from list: OK")
+		} else {
+			fails++
+			testLogf("GUI REMOVE several selected files from list: FAIL %v %v", left, left2)
+		}
+		ui(func() { h.clearList() })
 	}
 	// 3) режим обмена через окно: две передачи подряд, вторая - при окне, свёрнутом в трей
 	oldPorts, oldDisc := lanRelayPorts, lanDiscPort
