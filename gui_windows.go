@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,7 @@ import (
 )
 
 // appVersion - версия программы (показывается внизу окна).
-const appVersion = "1.7"
+const appVersion = "1.8"
 
 func crlf(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\n", "\r\n")
@@ -371,7 +372,34 @@ func guiMain(test bool) int {
 		checkBtn.SetEnabled(!b && !checking)
 		stopBtn.SetEnabled(b)
 	}
-	refreshList := func() { _ = fileList.SetModel(append([]string{}, items...)) }
+	fileModel := &fileListModel{items: &items}
+	refreshList := func() { fileModel.PublishItemsReset() }
+	// файлы, брошенные на вкладку «Обмен», копируются в папку Share и уходят на устройства как обычные изменения
+	dropToShare := func(ps []string) {
+		dir := resolveShareDir(exchDirLE.Text())
+		go func() {
+			n := 0
+			var firstErr error
+			_ = os.MkdirAll(dir, 0o755)
+			for _, p := range ps {
+				dst := uniquePath(dir, filepath.Base(p))
+				if err := copyTree(p, dst); err != nil && firstErr == nil {
+					firstErr = err
+				} else if err == nil {
+					n++
+				}
+			}
+			mw.Synchronize(func() {
+				txt := fmt.Sprintf("В папку обмена добавлено: %d", n)
+				if firstErr != nil {
+					txt += " (ошибка: " + firstErr.Error() + ")"
+				} else if !exch.Running() {
+					txt += ". Режим обмена выключен: файлы уйдут, когда включите его"
+				}
+				_ = exchStatusLbl.SetText(txt)
+			})
+		}()
+	}
 	addPaths := func(ps []string) {
 		for _, p := range ps {
 			dup := false
@@ -1179,7 +1207,7 @@ func guiMain(test bool) int {
 							Composite{
 								Layout: HBox{MarginsZero: true},
 								Children: []Widget{
-									ListBox{AssignTo: &fileList, MultiSelection: true, MinSize: Size{Height: 70}},
+									ListBox{AssignTo: &fileList, MultiSelection: true, Model: fileModel, MinSize: Size{Height: 70}},
 									Composite{
 										Layout: VBox{MarginsZero: true},
 										Children: []Widget{
@@ -1199,18 +1227,18 @@ func guiMain(test bool) int {
 												}
 											}},
 											PushButton{Text: "Убрать", OnClicked: func() {
-												mark := map[int]bool{}
-												for _, i := range fileList.SelectedIndexes() {
-													mark[i] = true
-												}
-												var nn []string
-												for i, p := range items {
-													if !mark[i] {
-														nn = append(nn, p)
+												// удаляем выделенные строки по одной, с конца, чтобы номера не сдвигались
+												sel := append([]int(nil), fileList.SelectedIndexes()...)
+												sort.Sort(sort.Reverse(sort.IntSlice(sel)))
+												last := -1
+												for _, i := range sel {
+													if i < 0 || i >= len(items) || i == last {
+														continue
 													}
+													last = i
+													items = append(items[:i], items[i+1:]...)
+													fileModel.PublishItemsRemoved(i, i)
 												}
-												items = nn
-												refreshList()
 											}},
 											PushButton{Text: "Очистить", OnClicked: func() {
 												items = nil
@@ -1693,7 +1721,22 @@ func guiMain(test bool) int {
 	}
 	_ = os.Remove(filepath.Join(exeDir(), "crocau-window.dat")) // файл ранних сборок
 	win.DragAcceptFiles(mw.Handle(), true)
-	mw.DropFiles().Attach(func(files []string) { addPaths(files) })
+	mw.DropFiles().Attach(func(files []string) {
+		title := ""
+		if i := tabs.CurrentIndex(); i >= 0 {
+			title = tabs.Pages().At(i).Title()
+		}
+		switch {
+		case title == "Обмен":
+			dropToShare(files)
+		case chatLan != nil && title == chatLan.title:
+			chatLan.dropFiles(files)
+		case chatNet != nil && title == chatNet.title:
+			chatNet.dropFiles(files)
+		default:
+			addPaths(files)
+		}
+	})
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
 		shareCancelOnce.Do(func() { close(shareCancel) })
 		if shellListener != nil {
@@ -1918,7 +1961,11 @@ func guiMain(test bool) int {
 		}()
 	}
 
-	mw.Run()
+	if test {
+		mw.Run()
+	} else {
+		runGuarded(mw)
+	}
 	if test {
 		select {
 		case testExit = <-testDone:

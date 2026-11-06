@@ -541,17 +541,7 @@ func (p *chatPanel) openRoom(label, pw string, common, selectIt bool) {
 		dlg.Title = "Файлы для отправки в чат"
 		dlg.Filter = "Все файлы (*.*)|*.*"
 		if ok, err := dlg.ShowOpenMultiple(p.mw); err == nil && ok {
-			files := append([]string(nil), dlg.FilePaths...)
-			go func() {
-				for _, f := range files {
-					err := p.node.SendFile(r, f, func(s string) { p.mw.Synchronize(func() { _ = pg.info.SetText(s) }) })
-					p.mw.Synchronize(func() {
-						if err != nil {
-							_ = pg.info.SetText("Файл не отправлен: " + err.Error())
-						}
-					})
-				}
-			}()
+			p.sendFiles(pg, append([]string(nil), dlg.FilePaths...))
 		}
 	})
 	row2, _ := walk.NewComposite(page)
@@ -668,6 +658,37 @@ func (p *chatPanel) downloadMsg(pg *chatPage, m ChatMsg) {
 			}
 		})
 	}()
+}
+
+// sendFiles отправляет файлы в комнату (в фоне; ход и ошибки показываются под историей).
+func (p *chatPanel) sendFiles(pg *chatPage, files []string) {
+	r := pg.room
+	go func() {
+		for _, f := range files {
+			err := p.node.SendFile(r, f, func(s string) { p.mw.Synchronize(func() { _ = pg.info.SetText(s) }) })
+			p.mw.Synchronize(func() {
+				if err != nil {
+					_ = pg.info.SetText("Файл не отправлен: " + err.Error())
+				}
+			})
+		}
+	}()
+}
+
+// dropFiles - файлы, брошенные на окно, пока открыта эта вкладка чата: уходят в текущую комнату.
+func (p *chatPanel) dropFiles(files []string) {
+	p.ensureStarted()
+	i := p.tw.CurrentIndex()
+	if p.node == nil || i < 0 {
+		_ = p.status.SetText("Сначала добавьте комнату кнопкой «+» или включите общую комнату.")
+		return
+	}
+	for _, pg := range p.pages {
+		if pg.page == p.tw.Pages().At(i) {
+			p.sendFiles(pg, files)
+			return
+		}
+	}
 }
 
 // onHistoryClick: клик по ссылке, файлу или «развернуть» в истории (выделение мышью не считается кликом).
