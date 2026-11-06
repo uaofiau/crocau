@@ -1826,7 +1826,7 @@ func guiMain(test bool) int {
 				},
 				clearList: func() { items = nil; refreshList() },
 				removeAt: func(idx []int) {
-					_ = fileList.SetSelectedIndexes(idx)
+					fileList.SetSelectedIndexes(idx)
 					removeSelected()
 				},
 				listItems: func() []string { return append([]string(nil), items...) },
